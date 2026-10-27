@@ -1,0 +1,39 @@
+{
+  "name": "runaway-backend",
+  "version": "1.0.0",
+  "description": "Authoritative backend for Urban Manhunt (Jet Lag style) game",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "tsx tests/game.test.ts"
+  },
+  "keywords": [
+    "socket.io",
+    "manhunt",
+    "jet-lag",
+    "urban-game",
+    "express",
+    "typescript"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.5",
+    "socket.io-client": "^4.8.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
