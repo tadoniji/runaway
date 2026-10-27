@@ -1,236 +1,160 @@
-export type GamePhase = 'LOBBY' | 'JAIL_TIME' | 'ACTIVE' | 'CAPTURED' | 'ENDED';
 export type PlayerRole = 'RUNNER' | 'HUNTER' | 'UNDECIDED';
-
-export interface GameSettings {
-  pingIntervalMinutes: number;        // Intervalle de transmission GPS aux chasseurs (ex. 10)
-  jailTimeMinutes: number;            // Période d'avance du runner avant la traque
-  vetoDurationMinutes: number;        // Durée de blocage lors d'un véto
-  captureRadiusMeters: number;        // Distance max pour tenter une capture (défaut : 15m)
-  transportRates: Record<string, number>; // Coût à la minute par mode (ex. { METRO: 30, TER: 35 })
-  challenges: any[];                  // Liste des défis configurés par l'hôte
-}
+export type GameStage = 'LOBBY' | 'JAIL_TIME' | 'ACTIVE' | 'CAPTURED' | 'ENDED';
 
 export interface Player {
-  id: string;                         // socket.id
+  id: string; // socket.id
+  playerId?: string;
   name: string;
   role: PlayerRole;
-  wantsRunner: boolean;               // Volontaire pour être runner
+  wantsToBeRunner: boolean;
   isReady: boolean;
-  avatarUrl: string | null;           // Image personnalisée pour la carte
+  avatarUri?: string | null;
   lat: number;
   lng: number;
+  speedKmH: number;
   lastSeen: number;
 }
 
-export interface ActiveCurse {
-  id: string;
-  title: string;
-  description: string;
-  coinReward: number;                 // Bonus crédité à l'acceptation
-  type?: 'SONAR' | 'FREEZE' | 'SPEED_LIMIT' | 'NO_CHECK_IN' | string;
-  appliedAt?: number;
-  durationMs?: number;
-}
-
-export interface PositionPoint {
+export interface PositionHistoryPoint {
   playerId: string;
   role: PlayerRole;
+  name: string;
   lat: number;
   lng: number;
   timestamp: number;
+  speedKmH?: number;
+  speed?: number;
   mode?: string;
   altitude?: number;
-  speed?: number;
+}
+
+export type PositionPoint = PositionHistoryPoint;
+
+export interface ActiveTransit {
+  mode: string;
+  startTime: number;
+}
+
+export interface GameSettings {
+  pingIntervalMinutes: number; // e.g. 10
+  jailTimeMinutes: number; // e.g. 15
+  vetoDurationMinutes: number; // e.g. 20
+  captureRadiusMeters: number; // e.g. 15
+  transportRates: Record<string, number>;
 }
 
 export interface GameSession {
-  gameCode: string;                   // Clé unique à 6 caractères
-  hostId: string;                     // socket.id du créateur
-  phase: GamePhase;
+  gameCode: string; // 6-character room code
+  hostId: string;
+  stage: GameStage;
   settings: GameSettings;
   players: Map<string, Player>;
   runnerId: string | null;
   runnerCoins: number;
-  activeTransit: { mode: string; startTimestamp: number } | null;
+  activeTransit: ActiveTransit | null;
   activeVetoUntil: number | null;
-  activeCurses: ActiveCurse[];
-  jailTimeEndsAt: number | null;
+  jailTimeEndTime: number;
   lastRunnerPingSentAt: number | null;
-  captureCandidateHunterId: string | null;
-  positionsHistory: PositionPoint[];  // Trace complète pour la carte de débriefing
+  activeCurseId: string | null;
+  isSuspect: boolean;
+  isEnded: boolean;
+  winner: string | null;
+  history: PositionHistoryPoint[];
+  createdAt: number;
 }
 
-/**
- * Serialized GameSession suitable for JSON transmission over WebSockets / HTTP
- * Replaces Map<string, Player> with a standard Record<string, Player>
- */
-export interface GameSessionDTO extends Omit<GameSession, 'players'> {
-  players: Record<string, Player>;
-}
-
-export interface TransitReport {
-  mode: string;
-  startTimestamp: number;
-  endTimestamp: number;
-  durationSeconds: number;
-  durationMinutes: number;
-  ratePerMinute: number;
-  coinsDeducted: number;
-  newCoinsBalance: number;
-  penaltiesApplied: boolean;
-  curseApplied?: ActiveCurse;
-  vetoUntil?: number;
-}
-
-export interface HunterPing {
-  lat: number;
-  lng: number;
-  timestamp: number;
-  triggerReason: 'PERIODIC' | 'SONAR_CURSE' | 'JAIL_TIME_END' | 'MANUAL';
-}
-
-// Client-to-Server Payload Contracts
-export interface CreateGamePayload {
-  hostName: string;
-  avatarUrl?: string | null;
-  wantsRunner?: boolean;
-  settings?: Partial<GameSettings>;
-}
-
-export interface JoinGamePayload {
-  gameCode?: string;
-  gameId?: string; // Backwards compatibility
-  name: string;
-  avatarUrl?: string | null;
-  wantsRunner?: boolean;
-  role?: PlayerRole;
-}
-
-export interface UpdateSettingsPayload {
-  gameCode: string;
-  settings: Partial<GameSettings>;
-}
-
-export interface SetReadyPayload {
-  gameCode: string;
-  isReady: boolean;
-}
-
-export interface SetWantsRunnerPayload {
-  gameCode: string;
-  wantsRunner: boolean;
-}
-
-export interface AssignRolePayload {
-  gameCode: string;
-  targetPlayerId: string;
-  role: PlayerRole;
-}
-
-export interface StartTransitPayload {
-  gameCode?: string;
-  gameId?: string; // Backwards compatibility
-  mode: string;
-}
-
-export interface StopTransitPayload {
-  gameCode?: string;
-  gameId?: string; // Backwards compatibility
-}
-
-export interface PingGpsPayload {
-  gameCode?: string;
-  gameId?: string; // Backwards compatibility
-  lat: number;
-  lng: number;
-  altitude?: number;
-  speed?: number;
-}
-
-export interface AttemptCapturePayload {
-  gameCode: string;
-}
-
-export interface AcceptCursePayload {
-  gameCode: string;
-  curse: ActiveCurse;
-}
-
-export interface ExportGpxPayload {
-  gameCode?: string;
-  gameId?: string; // Backwards compatibility
-}
-
-// Socket.IO Event Interfaces
-export interface ServerToClientEvents {
-  game_state_update: (session: GameSessionDTO) => void;
-  player_joined: (player: Player) => void;
-  player_left: (playerId: string) => void;
-  transit_started: (transit: { mode: string; startTimestamp: number }) => void;
-  transit_stopped: (report: TransitReport) => void;
-  suspect_alert: (data: { reason: string; coins: number; vetoUntil: number; curse?: ActiveCurse }) => void;
-  hunter_ping: (ping: HunterPing) => void;
-  hunter_location_update: (data: { hunterId: string; name: string; lat: number; lng: number }) => void;
-  capture_opportunity: (data: { hunterId: string; distanceMeters: number }) => void;
-  runner_captured: (data: { hunterId: string; hunterName: string; timestamp: number }) => void;
-  phase_changed: (data: { phase: GamePhase; jailTimeEndsAt: number | null }) => void;
-  gpx_exported: (data: { gpx: string; filename: string }) => void;
-  error_message: (data: { code: string; message: string }) => void;
-}
+// ==========================================
+// SOCKET.IO EVENT CONTRACTS (Android Client Aligned)
+// ==========================================
 
 export interface ClientToServerEvents {
-  create_game: (
-    payload: CreateGamePayload,
-    callback?: (response: { success: boolean; gameCode?: string; session?: GameSessionDTO; error?: string }) => void
+  create_game: (payload: {
+    name: string;
+    wantsToBeRunner?: boolean;
+    initialCoins?: number;
+    jailTimeMinutes?: number;
+  }) => void;
+
+  join_game: (payload: {
+    gameId: string;
+    playerId: string;
+    role: string;
+    name: string;
+    wantsToBeRunner?: boolean;
+    avatarUri?: string;
+  }) => void;
+
+  'player:toggle_ready': (payload: { gameCode: string }) => void;
+
+  'player:toggle_wants_runner': (payload: { gameCode: string }) => void;
+
+  start_game: (payload: { gameCode: string }) => void;
+
+  transit_start: (payload: { mode: string }) => void;
+
+  transit_stop: () => void;
+
+  ping_gps: (payload: {
+    lat: number;
+    lng: number;
+    timestamp: number;
+    speedKmH?: number;
+  }) => void;
+
+  'curse:accept': (payload: { curseId: string; coinReward: number }) => void;
+
+  'curse:veto': (payload: { curseId: string; bonusCoins: number }) => void;
+
+  'hunter:attempt_capture': () => void;
+
+  'runner:confirm_captured': () => void;
+}
+
+export interface ServerToClientEvents {
+  game_created: (payload: { gameCode: string; initialCoins: number }) => void;
+
+  'lobby:updated': (payload: { players: any[] }) => void;
+
+  'game:started': (payload: {
+    runnerId: string;
+    stage: string;
+    jailTimeEndTime: number;
+  }) => void;
+
+  'coins:updated': (payload: { coins: number }) => void;
+
+  'game:suspect_alert': (payload: { isSuspect: boolean; reason?: string }) => void;
+
+  'veto:started': (payload: { vetoEndTime: number }) => void;
+
+  'runner:curse_triggered': (payload: {
+    id: string;
+    title: string;
+    description: string;
+    durationMinutes: number;
+  }) => void;
+
+  'runner:last_ping': (payload: {
+    lat: number;
+    lng: number;
+    timestamp: number;
+    speedKmH: number;
+    avatarUri?: string;
+  }) => void;
+
+  'hunters:updated': (
+    payload: Array<{ id: string; name: string; lat?: number; lng?: number }>
   ) => void;
-  join_game: (
-    payload: JoinGamePayload,
-    callback?: (response: { success: boolean; session?: GameSessionDTO; error?: string }) => void
-  ) => void;
-  update_settings: (
-    payload: UpdateSettingsPayload,
-    callback?: (response: { success: boolean; session?: GameSessionDTO; error?: string }) => void
-  ) => void;
-  set_ready: (
-    payload: SetReadyPayload,
-    callback?: (response: { success: boolean; session?: GameSessionDTO; error?: string }) => void
-  ) => void;
-  set_wants_runner: (
-    payload: SetWantsRunnerPayload,
-    callback?: (response: { success: boolean; session?: GameSessionDTO; error?: string }) => void
-  ) => void;
-  assign_role: (
-    payload: AssignRolePayload,
-    callback?: (response: { success: boolean; session?: GameSessionDTO; error?: string }) => void
-  ) => void;
-  start_game: (
-    payload: { gameCode: string },
-    callback?: (response: { success: boolean; session?: GameSessionDTO; error?: string }) => void
-  ) => void;
-  transit_start: (
-    payload: StartTransitPayload,
-    callback?: (response: { success: boolean; session?: GameSessionDTO; error?: string }) => void
-  ) => void;
-  transit_stop: (
-    payload: StopTransitPayload,
-    callback?: (response: { success: boolean; report?: TransitReport; session?: GameSessionDTO; error?: string }) => void
-  ) => void;
-  ping_gps: (
-    payload: PingGpsPayload,
-    callback?: (response: { success: boolean; broadcasted: boolean; distanceToRunner?: number; error?: string }) => void
-  ) => void;
-  attempt_capture: (
-    payload: AttemptCapturePayload,
-    callback?: (response: { success: boolean; captured?: boolean; distanceMeters?: number; error?: string }) => void
-  ) => void;
-  accept_curse: (
-    payload: AcceptCursePayload,
-    callback?: (response: { success: boolean; session?: GameSessionDTO; error?: string }) => void
-  ) => void;
-  export_gpx: (
-    payload: ExportGpxPayload,
-    callback?: (response: { success: boolean; gpx?: string; error?: string }) => void
-  ) => void;
+
+  'capture:threat': (payload: {
+    inRange: boolean;
+    hunterName: string;
+    distance: number;
+  }) => void;
+
+  'game:ended': (payload: { winner: string; history: any[] }) => void;
+
+  error_message?: (payload: { code: string; message: string }) => void;
 }
 
 export interface InterServerEvents {

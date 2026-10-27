@@ -1,134 +1,66 @@
 # Runaway - Urban Manhunt Authoritative Backend 🏃💨🎯
 
 Serveur backend autoritaire haute performance pour jeu de Manhunt urbain (format Jet Lag: The Game).
-Développé en **Node.js**, **Express**, **Socket.IO** et **TypeScript**, déployé sur **Render**.
+Développé en **Node.js**, **Express**, **Socket.IO** et **TypeScript**, synchronisé avec l'application cliente Android.
 
 ---
 
-## 🌟 Architecture & Nouveautés
+## 🌟 Architecture & Rôles
 
-- **Authoritative Server (Anti-Triche)** : Le serveur arbitre de façon absolue les timers de transport, le calcul des coins, la gestion du Jail Time, les véto et la distance de capture.
-- **Machine à États Multi-Phases (`GamePhase`)** :
-  - `LOBBY` : Salle d'attente, sélection du runner (`wantsRunner`), readiness des joueurs (`isReady`), configuration des règles (`GameSettings`) par l'hôte.
-  - `JAIL_TIME` : Période d'avance du Runner (`jailTimeMinutes`) avant le départ des chasseurs.
-  - `ACTIVE` : Traque active avec pings GPS périodiques, transits urbains et détection de proximité.
-  - `CAPTURED` : Capture réussie d'un Runner par un Hunter à moins de `captureRadiusMeters` (ex: 15 mètres).
-  - `ENDED` : Fin de session et débriefing.
-- **Session par Code Unique (`gameCode`)** : Clé alphanumérique unique à 6 caractères (ex: `Z8K2M9`).
-- **Gestion d'état en mémoire (`GameManager` singleton)** : Stockage autoritaire avec `Map<string, Player>` et conversion sérialisée JSON automatique pour Socket.IO (`GameSessionDTO`).
-- **Formule de Haversine Intégrée** : Détection ultra-précise de proximité géodésique entre Runner et Hunters pour déclencher l'opportunité de capture (`capture_opportunity`).
-- **Export GPX standardisé** : Traces complètes (`positionsHistory`) exportables par WebSocket ou téléchargement direct HTTP (`/api/games/:gameCode/gpx`).
-
----
-
-## ⚙️ Modèle de Données (`types.ts`)
-
-```typescript
-export type GamePhase = 'LOBBY' | 'JAIL_TIME' | 'ACTIVE' | 'CAPTURED' | 'ENDED';
-export type PlayerRole = 'RUNNER' | 'HUNTER' | 'UNDECIDED';
-
-export interface GameSettings {
-  pingIntervalMinutes: number;        // Intervalle de transmission GPS aux chasseurs (ex. 10)
-  jailTimeMinutes: number;            // Période d'avance du runner avant la traque
-  vetoDurationMinutes: number;        // Durée de blocage lors d'un véto
-  captureRadiusMeters: number;        // Distance max pour tenter une capture (défaut : 15m)
-  transportRates: Record<string, number>; // Coût à la minute par mode (ex. { METRO: 30, TER: 35 })
-  challenges: any[];                  // Liste des défis configurés par l'hôte
-}
-
-export interface Player {
-  id: string;                         // socket.id
-  name: string;
-  role: PlayerRole;
-  wantsRunner: boolean;               // Volontaire pour être runner
-  isReady: boolean;
-  avatarUrl: string | null;           // Image personnalisée pour la carte
-  lat: number;
-  lng: number;
-  lastSeen: number;
-}
-
-export interface ActiveCurse {
-  id: string;
-  title: string;
-  description: string;
-  coinReward: number;                 // Bonus crédité à l'acceptation
-}
-
-export interface PositionPoint {
-  playerId: string;
-  role: PlayerRole;
-  lat: number;
-  lng: number;
-  timestamp: number;
-  mode?: string;
-}
-
-export interface GameSession {
-  gameCode: string;                   // Clé unique à 6 caractères
-  hostId: string;                     // socket.id du créateur
-  phase: GamePhase;
-  settings: GameSettings;
-  players: Map<string, Player>;
-  runnerId: string | null;
-  runnerCoins: number;
-  activeTransit: { mode: string; startTimestamp: number } | null;
-  activeVetoUntil: number | null;
-  activeCurses: ActiveCurse[];
-  jailTimeEndsAt: number | null;
-  lastRunnerPingSentAt: number | null;
-  captureCandidateHunterId: string | null;
-  positionsHistory: PositionPoint[];  // Trace complète pour la carte de débriefing
-}
-```
+- **Serveur Autoritaire** : Le serveur est l'arbitre unique des timers de transport, calcul des soldes (coins), détection de faillite (overdraft / véto), pings GPS différés et vérification de la portée de capture (15m).
+- **Code de Session à 6 Caractères** : Clé alphanumérique (ex: `QXKAWL`).
+- **Tirage au Sort Pondéré du Runner** : Au lancement (`start_game`), les joueurs ayant activé `wantsToBeRunner` ont un poids prépondérant (poids 10 vs 1).
+- **Taximètre des Transports** :
+  - `TRAIN_TER`: 35 coins/min
+  - `METRO`: 30 coins/min
+  - `TELEO`: 25 coins/min
+  - `BUS_LINEO`: 15 coins/min
+  - `TRAM`: 12 coins/min
+  - `BUS_LOCAL`: 6 coins/min
+- **Gestion du Découvert (`coins < 0`)** :
+  - Déclenchement de `game:suspect_alert` (`isSuspect: true`).
+  - Déclenchement de `veto:started` (20 minutes d'interdiction de transport).
+  - Déclenchement de `runner:curse_triggered` (malédiction tirée au sort).
+- **Capture Géodésique (15m)** :
+  - Sur `hunter:attempt_capture`, calcul Haversine immédiat. Si distance $\le 15\text{ m}$, diffusion de `capture:threat` (`inRange: true`).
+  - Sur `runner:confirm_captured`, fige la session et diffuse `game:ended` avec l'historique complet.
 
 ---
 
-## 🚇 Barème des Transports par Défaut (`transportRates`)
+## 📡 Contrat d'Événements Socket.IO (Client Android)
 
-| Mode | Coût (coins / min) | Description |
+### 📤 Client ➔ Serveur (`ClientToServerEvents`)
+
+| Événement | Payload | Description |
 | :--- | :--- | :--- |
-| `TRAIN_TER` | **35** | Train express régional |
-| `METRO` | **30** | Métro urbain |
-| `TELEO` | **25** | Téléphérique urbain |
-| `BUS_LINEO` | **15** | Lignes de bus express |
-| `TRAM` | **12** | Tramway |
-| `BUS_LOCAL` | **6** | Lignes de bus locales |
+| `create_game` | `{ name: string, wantsToBeRunner?: boolean, initialCoins?: number, jailTimeMinutes?: number }` | Crée une session de jeu |
+| `join_game` | `{ gameId: string, playerId: string, role: string, name: string, wantsToBeRunner?: boolean, avatarUri?: string }` | Rejoint une session |
+| `player:toggle_ready` | `{ gameCode: string }` | Bascule le statut prêt du joueur |
+| `player:toggle_wants_runner` | `{ gameCode: string }` | Bascule la volonté d'être runner |
+| `start_game` | `{ gameCode: string }` | Lance la partie (tirage pondéré du runner) |
+| `transit_start` | `{ mode: string }` | Démarre le chronomètre d'un transport |
+| `transit_stop` | *(aucun)* | Arrête le transport et débite les coins |
+| `ping_gps` | `{ lat: number, lng: number, timestamp: number, speedKmH?: number }` | Transmet la position d'un joueur |
+| `curse:accept` | `{ curseId: string, coinReward: number }` | Accepte une malédiction pour gagner des coins |
+| `curse:veto` | `{ curseId: string, bonusCoins: number }` | Veto de malédiction avec compensation |
+| `hunter:attempt_capture` | *(aucun)* | Tente de capturer le runner |
+| `runner:confirm_captured` | *(aucun)* | Confirme la capture et termine la partie |
 
----
+### 📥 Serveur ➔ Client (`ServerToClientEvents`)
 
-## 📡 Événements Socket.IO Principaux
-
-### 1. `create_game`
-- **Client** : `{ hostName: string, avatarUrl?: string, wantsRunner?: boolean, settings?: Partial<GameSettings> }`
-- **Ack** : `{ success: true, gameCode: "AB12CD", session: GameSessionDTO }`
-
-### 2. `join_game`
-- **Client** : `{ gameCode: "AB12CD", name: string, avatarUrl?: string, wantsRunner?: boolean, role?: PlayerRole }`
-- **Ack** : `{ success: true, session: GameSessionDTO }`
-
-### 3. `start_game` (Hôte uniquement)
-- **Client** : `{ gameCode: "AB12CD" }`
-- **Effet** : Désigne le Runner, bascule en `JAIL_TIME` (ou `ACTIVE`) et notifie `phase_changed`.
-
-### 4. `transit_start` / `transit_stop`
-- **Client** : `{ gameCode: "AB12CD", mode: "METRO" }`
-- **Effet** : Débit automatique des coins à l'arrêt selon la durée réelle. En cas de découvert (`runnerCoins < 0`), déclenche véto + malédiction et alerte `suspect_alert` aux chasseurs.
-
-### 5. `ping_gps`
-- **Client** : `{ gameCode: "AB12CD", lat: 43.6045, lng: 1.4442 }`
-- **Effet** :
-  - Archive la coordonnée dans `positionsHistory`.
-  - Diffuse `hunter_ping` aux chasseurs si intervalle de 10 min écoulé ou curse `SONAR`.
-  - Calcule la distance de capture en direct et émet `capture_opportunity` aux chasseurs éligibles.
-
-### 6. `attempt_capture`
-- **Client** : `{ gameCode: "AB12CD" }`
-- **Effet** : Vérifie si la distance avec le runner est `<= captureRadiusMeters` (ex: 15m). Si oui, transitionne en phase `CAPTURED` et diffuse `runner_captured`.
-
-### 7. `export_gpx`
-- **Client** : `{ gameCode: "AB12CD" }`
-- **Ack** : `{ success: true, gpx: "<?xml..." }`
+| Événement | Payload | Description |
+| :--- | :--- | :--- |
+| `game_created` | `{ gameCode: string, initialCoins: number }` | Confirmation de création de la session |
+| `lobby:updated` | `{ players: any[] }` | Liste actualisée des joueurs dans le lobby |
+| `game:started` | `{ runnerId: string, stage: string, jailTimeEndTime: number }` | Notification de lancement |
+| `coins:updated` | `{ coins: number }` | Nouveau solde de coins du runner |
+| `game:suspect_alert` | `{ isSuspect: boolean, reason?: string }` | Alerte de banqueroute émise à tous |
+| `veto:started` | `{ vetoEndTime: number }` | Fin programmée du véto de transport (20 min) |
+| `runner:curse_triggered` | `{ id: string, title: string, description: string, durationMinutes: number }` | Malédiction infligée |
+| `runner:last_ping` | `{ lat: number, lng: number, timestamp: number, speedKmH: number, avatarUri?: string }` | Coordonnées du runner diffusées aux chasseurs |
+| `hunters:updated` | `Array<{ id: string, name: string, lat?: number, lng?: number }>` | Positions partagées entre chasseurs |
+| `capture:threat` | `{ inRange: boolean, hunterName: string, distance: number }` | Alerte de tentative de capture (portée 15m) |
+| `game:ended` | `{ winner: string, history: any[] }` | Fin de partie avec trace GPS complète |
 
 ---
 
@@ -138,7 +70,7 @@ export interface GameSession {
 | :--- | :--- | :--- |
 | `GET` | `/health` | Healthcheck Render (`200 OK`) |
 | `GET` | `/api/games` | Liste synthétique des sessions actives |
-| `GET` | `/api/games/:gameCode` | État complet sérialisé d'une partie |
+| `GET` | `/api/games/:gameCode` | Détails complets d'une session |
 | `GET` | `/api/games/:gameCode/gpx` | Téléchargement du fichier trace GPX 1.1 |
 
 ---
@@ -149,7 +81,7 @@ export interface GameSession {
 # Installation des dépendances
 npm install
 
-# Exécution des tests unitaires et intégration (10/10)
+# Exécution des tests automatisés (9/9)
 npm test
 
 # Compilation TypeScript vers dist/

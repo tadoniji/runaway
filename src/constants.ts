@@ -1,7 +1,4 @@
-import { ActiveCurse, GameSettings } from './types';
-
-// Default transport rates in coins / minute
-export const DEFAULT_TRANSPORT_RATES: Record<string, number> = {
+export const TRANSIT_RATES: Record<string, number> = {
   TRAIN_TER: 35,
   METRO: 30,
   TELEO: 25,
@@ -10,47 +7,42 @@ export const DEFAULT_TRANSPORT_RATES: Record<string, number> = {
   BUS_LOCAL: 6,
 };
 
-// Default game settings
-export const DEFAULT_SETTINGS: GameSettings = {
-  pingIntervalMinutes: 10,
-  jailTimeMinutes: 15,
-  vetoDurationMinutes: 20,
-  captureRadiusMeters: 15,
-  transportRates: { ...DEFAULT_TRANSPORT_RATES },
-  challenges: [],
-};
+export const DEFAULT_INITIAL_COINS = 250;
+export const DEFAULT_JAIL_TIME_MINUTES = 15;
+export const DEFAULT_PING_INTERVAL_MINUTES = 10;
+export const DEFAULT_VETO_DURATION_MINUTES = 20;
+export const CAPTURE_RADIUS_METERS = 15;
 
-// Initial balance for the Runner
-export const INITIAL_RUNNER_COINS = 250;
+export interface CurseTemplate {
+  id: string;
+  title: string;
+  description: string;
+  durationMinutes: number;
+}
 
-// Currencies and penalties pool
-export const CURSE_TEMPLATES: Omit<ActiveCurse, 'id'>[] = [
+export const CURSE_TEMPLATES: CurseTemplate[] = [
   {
+    id: 'curse_sonar',
     title: 'Sonar Permanent',
     description: 'Votre balise GPS diffuse votre position exacte aux chasseurs en temps réel à chaque ping.',
-    coinReward: 50,
-    type: 'SONAR',
-    durationMs: 20 * 60 * 1000,
+    durationMinutes: 20,
   },
   {
+    id: 'curse_freeze',
     title: 'Arrêt Forcé (Freeze)',
     description: 'Le Runner doit s\'immobiliser immédiatement pendant 5 minutes sans pouvoir se déplacer.',
-    coinReward: 75,
-    type: 'FREEZE',
-    durationMs: 5 * 60 * 1000,
+    durationMinutes: 5,
   },
   {
+    id: 'curse_speed_limit',
     title: 'Interdiction de Courir',
-    description: 'Le Runner n\'a le droit qu\'à la marche normale pendant les 15 prochaines minutes.',
-    coinReward: 40,
-    type: 'SPEED_LIMIT',
-    durationMs: 15 * 60 * 1000,
+    description: 'Le Runner n\'a le droit qu\'à la marche normale pendant 15 minutes.',
+    durationMinutes: 15,
   },
   {
+    id: 'curse_no_station',
     title: 'Zone Interdite',
     description: 'Interdiction d\'entrer dans les gares ou stations pendant la durée du véto.',
-    coinReward: 60,
-    type: 'NO_CHECK_IN',
-    durationMs: 20 * 60 * 1000,
+    durationMinutes: 20,
   },
 ];

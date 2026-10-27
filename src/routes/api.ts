@@ -24,14 +24,15 @@ apiRouter.get('/api/games', (_req: Request, res: Response) => {
     const session = gameManager.getSession(code);
     return {
       gameCode: code,
-      phase: session?.phase,
+      stage: session?.stage,
       hostId: session?.hostId,
       runnerId: session?.runnerId,
       runnerCoins: session?.runnerCoins,
       playersCount: session?.players.size || 0,
-      historyCount: session?.positionsHistory.length || 0,
+      historyCount: session?.history.length || 0,
       activeTransit: session?.activeTransit,
-      jailTimeEndsAt: session?.jailTimeEndsAt,
+      jailTimeEndTime: session?.jailTimeEndTime,
+      isEnded: session?.isEnded,
     };
   });
 
@@ -39,7 +40,7 @@ apiRouter.get('/api/games', (_req: Request, res: Response) => {
 });
 
 /**
- * Get full serialized state of a specific game
+ * Get full state of a specific game
  */
 apiRouter.get('/api/games/:gameCode', (req: Request, res: Response) => {
   const gameCode = String(req.params.gameCode);
@@ -49,7 +50,17 @@ apiRouter.get('/api/games/:gameCode', (req: Request, res: Response) => {
     return res.status(404).json({ error: `Game session "${gameCode}" not found.` });
   }
 
-  return res.json({ session: gameManager.serializeSession(session) });
+  const players: Record<string, any> = {};
+  session.players.forEach((p, id) => {
+    players[id] = p;
+  });
+
+  return res.json({
+    session: {
+      ...session,
+      players,
+    },
+  });
 });
 
 /**

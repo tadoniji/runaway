@@ -7,133 +7,23 @@ import { GameManager } from '../src/GameManager';
 import { setupSocketHandlers } from '../src/socket';
 import {
   ClientToServerEvents,
-  GameSessionDTO,
-  HunterPing,
   ServerToClientEvents,
-  TransitReport,
 } from '../src/types';
 
 type TestClientSocket = ClientSocket<ServerToClientEvents, ClientToServerEvents>;
 
 async function runTests() {
-  console.log('--- TEST SUITE: Urban Manhunt Updated Architecture ---');
+  console.log('--- TEST SUITE: Urban Manhunt Android-Aligned Socket.IO Protocol ---');
 
   const gameManager = GameManager.getInstance();
   gameManager.clearAll();
 
-  // ==========================================
-  // UNIT TESTS: GameManager Logic
-  // ==========================================
-  console.log('\n[1] Testing GameManager Unit Logic...');
-
-  // 1.1 Create Session in LOBBY phase
-  const session = gameManager.createGame('socket_host_1', 'Ben Host', null, true, {
-    jailTimeMinutes: 10,
-    captureRadiusMeters: 15,
-  });
-
-  assert.strictEqual(session.gameCode.length, 6, 'Game code should be 6 characters');
-  assert.strictEqual(session.phase, 'LOBBY', 'Initial phase must be LOBBY');
-  assert.strictEqual(session.runnerCoins, 250, 'Initial runner coins must be 250');
-  assert.strictEqual(session.hostId, 'socket_host_1');
-  assert.strictEqual(session.players.size, 1);
-  console.log(`  ✓ Game session created with code "${session.gameCode}" in phase LOBBY`);
-
-  // 1.2 Add Hunter Player
-  const hunterJoin = gameManager.addPlayer(session.gameCode, {
-    id: 'socket_hunter_1',
-    name: 'Sam Hunter',
-    wantsRunner: false,
-    role: 'HUNTER',
-  });
-  assert.strictEqual(session.players.size, 2);
-  assert.strictEqual(hunterJoin.player.role, 'HUNTER');
-  console.log('  ✓ Hunter player joined lobby');
-
-  // 1.3 Lobby actions: set ready & wantsRunner
-  gameManager.setPlayerReady(session.gameCode, 'socket_hunter_1', true);
-  assert.strictEqual(session.players.get('socket_hunter_1')?.isReady, true);
-  console.log('  ✓ Player readiness toggled');
-
-  // 1.4 Start Game -> transitions to JAIL_TIME
-  const startResult = gameManager.startGame(session.gameCode, 'socket_host_1');
-  assert.strictEqual(startResult.success, true);
-  assert.strictEqual(session.phase, 'JAIL_TIME', 'Phase must transition to JAIL_TIME');
-  assert.ok(session.jailTimeEndsAt !== null, 'Jail time timer must be set');
-  assert.strictEqual(session.runnerId, 'socket_host_1', 'Host was runner candidate');
-  console.log(`  ✓ Game started! Phase is JAIL_TIME until ${new Date(session.jailTimeEndsAt!).toLocaleTimeString()}`);
-
-  // 1.5 Runner transit during Jail Time
-  const transitStart = gameManager.startTransit(session.gameCode, 'socket_host_1', 'METRO');
-  assert.strictEqual(transitStart.success, true);
-  assert.strictEqual(session.activeTransit?.mode, 'METRO');
-  console.log('  ✓ Transit METRO started by Runner');
-
-  // Simulate 3 minutes transit
-  if (session.activeTransit) {
-    session.activeTransit.startTimestamp = Date.now() - 3 * 60 * 1000;
-  }
-  const transitStop = gameManager.stopTransit(session.gameCode, 'socket_host_1');
-  assert.strictEqual(transitStop.success, true);
-  // Cost: 3 * 30 = 90. Balance: 250 - 90 = 160.
-  assert.strictEqual(session.runnerCoins, 160);
-  console.log(`  ✓ Transit stopped. Deducted: ${transitStop.report?.coinsDeducted} coins. Balance: ${session.runnerCoins}`);
-
-  // 1.6 Fast forward Jail Time to test ACTIVE phase
-  session.jailTimeEndsAt = Date.now() - 1000;
-  gameManager.getSession(session.gameCode); // Triggers lifecycle check
-  assert.strictEqual(session.phase, 'ACTIVE', 'Phase should transition to ACTIVE after jail time');
-  console.log('  ✓ Phase transitioned to ACTIVE after Jail Time expiration');
-
-  // 1.7 GPS Recording & Proximity Check
-  // Runner position: Toulouse Capitole (43.6045, 1.4442)
-  const runnerGps = gameManager.recordPosition(session.gameCode, 'socket_host_1', {
-    lat: 43.6045,
-    lng: 1.4442,
-  });
-  assert.strictEqual(runnerGps.success, true);
-  assert.strictEqual(runnerGps.broadcastToHunters, true, 'First ping broadcasts');
-
-  // Hunter distant: 500 meters away -> no capture opportunity
-  const hunterFar = gameManager.recordPosition(session.gameCode, 'socket_hunter_1', {
-    lat: 43.6090,
-    lng: 1.4442,
-  });
-  assert.strictEqual(hunterFar.captureOpportunity, false);
-  const farCapture = gameManager.attemptCapture(session.gameCode, 'socket_hunter_1');
-  assert.strictEqual(farCapture.captured, false, 'Capture must fail when distance > 15m');
-  console.log('  ✓ Capture rejected at 500m distance');
-
-  // Hunter approaches to 10 meters away -> capture opportunity
-  const hunterClose = gameManager.recordPosition(session.gameCode, 'socket_hunter_1', {
-    lat: 43.60455,
-    lng: 1.4442, // ~5.5 meters apart
-  });
-  assert.strictEqual(hunterClose.captureOpportunity, true, 'Capture opportunity within 15m');
-  console.log(`  ✓ Proximity detected: Hunter within capture radius (${hunterClose.distanceToRunner}m)`);
-
-  // Attempt Capture
-  const captureSuccess = gameManager.attemptCapture(session.gameCode, 'socket_hunter_1');
-  assert.strictEqual(captureSuccess.success, true);
-  assert.strictEqual(captureSuccess.captured, true);
-  assert.strictEqual(session.phase, 'CAPTURED');
-  console.log('  ✓ Runner captured! Phase transitioned to CAPTURED');
-
-  // 1.8 GPX Export check
-  const gpxExport = gameManager.exportGpx(session.gameCode);
-  assert.strictEqual(gpxExport.success, true);
-  assert.ok(gpxExport.gpx?.includes('<gpx version="1.1"'));
-  assert.ok(gpxExport.gpx?.includes('lat="43.6045000"'));
-  console.log('  ✓ GPX export properly created from position history');
-
-  // ==========================================
-  // INTEGRATION TESTS: Socket.IO Server & Client
-  // ==========================================
-  console.log('\n[2] Testing Socket.IO Integration with New Architecture...');
-
+  // Create test server
   const app = express();
   const server = http.createServer(app);
-  const io = new Server(server, { cors: { origin: '*' } });
+  const io = new Server<ClientToServerEvents, ServerToClientEvents>(server, {
+    cors: { origin: '*' },
+  });
   setupSocketHandlers(io);
 
   await new Promise<void>((resolve) => {
@@ -151,92 +41,200 @@ async function runTests() {
     new Promise<void>((res) => hostClient.on('connect', () => res())),
     new Promise<void>((res) => hunterClient.on('connect', () => res())),
   ]);
+  console.log(`  ✓ Both test sockets connected to test server on port ${port}`);
 
-  // Host creates game
-  const createdGamePromise = new Promise<{ gameCode: string; session: GameSessionDTO }>((resolve) => {
-    hostClient.emit(
-      'create_game',
-      { hostName: 'HostPlayer', wantsRunner: true, settings: { jailTimeMinutes: 0 } },
-      (resp) => {
-        assert.strictEqual(resp.success, true);
-        resolve({ gameCode: resp.gameCode!, session: resp.session! });
-      }
-    );
-  });
-  const { gameCode } = await createdGamePromise;
-  console.log(`  ✓ Socket host created game: ${gameCode}`);
-
-  // Hunter joins game
-  const hunterJoinPromise = new Promise<GameSessionDTO>((resolve) => {
-    hunterClient.emit(
-      'join_game',
-      { gameCode, name: 'HunterPlayer', wantsRunner: false, role: 'HUNTER' },
-      (resp) => {
-        assert.strictEqual(resp.success, true);
-        resolve(resp.session!);
-      }
-    );
-  });
-  const joinedSession = await hunterJoinPromise;
-  assert.strictEqual(Object.keys(joinedSession.players).length, 2);
-  console.log('  ✓ Hunter joined via Socket.IO');
-
-  // Start game via Socket (jailTime = 0 -> directly ACTIVE)
-  const startGamePromise = new Promise<GameSessionDTO>((resolve) => {
-    hostClient.emit('start_game', { gameCode }, (resp) => {
-      assert.strictEqual(resp.success, true);
-      resolve(resp.session!);
-    });
-  });
-  const activeSession = await startGamePromise;
-  assert.strictEqual(activeSession.phase, 'ACTIVE');
-  console.log('  ✓ Game started via Socket.IO directly in ACTIVE phase');
-
-  // Runner GPS Ping
-  const pingPromise = new Promise<HunterPing>((resolve) => {
-    hunterClient.on('hunter_ping', (ping) => resolve(ping));
+  // 1. CREATE_GAME
+  console.log('\n[1] Testing create_game and lobby:updated...');
+  const createGamePromise = new Promise<{ gameCode: string; initialCoins: number }>((resolve) => {
+    hostClient.on('game_created', (data) => resolve(data));
   });
 
-  await new Promise<void>((resolve) => {
-    hostClient.emit('ping_gps', { gameCode, lat: 43.6045, lng: 1.4442 }, (resp) => {
-      assert.strictEqual(resp.success, true);
-      resolve();
+  hostClient.emit('create_game', {
+    name: 'RunnerHost',
+    wantsToBeRunner: true,
+    initialCoins: 250,
+    jailTimeMinutes: 0, // Direct active for testing
+  });
+
+  const createdData = await createGamePromise;
+  assert.strictEqual(createdData.gameCode.length, 6, 'gameCode must be 6 characters');
+  assert.strictEqual(createdData.initialCoins, 250);
+  const gameCode = createdData.gameCode;
+  console.log(`  ✓ Game created: room code "${gameCode}", coins: ${createdData.initialCoins}`);
+
+  // 2. JOIN_GAME
+  console.log('\n[2] Testing join_game...');
+  const hunterLobbyPromise = new Promise<{ players: any[] }>((resolve) => {
+    hunterClient.on('lobby:updated', (data) => {
+      if (data.players.length === 2) resolve(data);
     });
   });
 
-  const receivedPing = await pingPromise;
-  assert.strictEqual(receivedPing.lat, 43.6045);
-  console.log('  ✓ GPS ping broadcasted to Hunter');
+  hunterClient.emit('join_game', {
+    gameId: gameCode,
+    playerId: 'android_hunter_1',
+    role: 'HUNTER',
+    name: 'HunterPlayer',
+    wantsToBeRunner: false,
+  });
 
-  // Hunter moves close to runner
-  await new Promise<void>((resolve) => {
-    hunterClient.emit('ping_gps', { gameCode, lat: 43.60451, lng: 1.4442 }, (resp) => {
-      assert.strictEqual(resp.success, true);
-      resolve();
+  const lobbyData = await hunterLobbyPromise;
+  assert.strictEqual(lobbyData.players.length, 2);
+  console.log(`  ✓ Hunter joined. Lobby has ${lobbyData.players.length} players`);
+
+  // 3. TOGGLE READY & WANTS_RUNNER
+  console.log('\n[3] Testing player:toggle_ready and player:toggle_wants_runner...');
+  const readyPromise = new Promise<{ players: any[] }>((resolve) => {
+    hostClient.on('lobby:updated', (data) => {
+      const hunter = data.players.find((p) => p.name === 'HunterPlayer');
+      if (hunter && hunter.isReady) resolve(data);
     });
   });
 
-  // Hunter captures Runner via Socket
-  const capturePromise = new Promise<{ captured: boolean }>((resolve) => {
-    hunterClient.emit('attempt_capture', { gameCode }, (resp) => {
-      assert.strictEqual(resp.success, true);
-      resolve({ captured: resp.captured! });
-    });
-  });
-  const captureResult = await capturePromise;
-  assert.strictEqual(captureResult.captured, true);
-  console.log('  ✓ attempt_capture successful via Socket.IO');
+  hunterClient.emit('player:toggle_ready', { gameCode });
+  const readyLobby = await readyPromise;
+  const hunterP = readyLobby.players.find((p) => p.name === 'HunterPlayer');
+  assert.strictEqual(hunterP?.isReady, true);
+  console.log('  ✓ Hunter toggled ready state');
 
-  // Export GPX via Socket
-  const gpxPromise = new Promise<string>((resolve) => {
-    hostClient.emit('export_gpx', { gameCode }, (resp) => {
-      assert.strictEqual(resp.success, true);
-      resolve(resp.gpx!);
+  // 4. START_GAME (Weighted selection -> host volunteered -> host is Runner)
+  console.log('\n[4] Testing start_game...');
+  const gameStartPromise = new Promise<{ runnerId: string; stage: string; jailTimeEndTime: number }>((resolve) => {
+    hostClient.on('game:started', (data) => resolve(data));
+  });
+
+  const coinsUpdatePromise = new Promise<{ coins: number }>((resolve) => {
+    hostClient.on('coins:updated', (data) => resolve(data));
+  });
+
+  hostClient.emit('start_game', { gameCode });
+
+  const startedGame = await gameStartPromise;
+  const initialCoinsPayload = await coinsUpdatePromise;
+  assert.strictEqual(startedGame.runnerId, hostClient.id);
+  assert.strictEqual(initialCoinsPayload.coins, 250);
+  console.log(`  ✓ Game started! Runner: ${startedGame.runnerId}, stage: ${startedGame.stage}, coins: ${initialCoinsPayload.coins}`);
+
+  // 5. TRANSIT TAXIMETER (Coins & Overdraft)
+  console.log('\n[5] Testing transit_start and transit_stop...');
+  hostClient.emit('transit_start', { mode: 'METRO' });
+  await new Promise((r) => setTimeout(r, 50));
+
+  // Simulate 3 minutes in transit
+  const session = gameManager.getSession(gameCode);
+  assert.ok(session?.activeTransit !== null);
+  session!.activeTransit!.startTime = Date.now() - 3 * 60 * 1000;
+
+  const transitStopCoinsPromise = new Promise<{ coins: number }>((resolve) => {
+    hostClient.on('coins:updated', (data) => {
+      if (data.coins === 160) resolve(data);
     });
   });
-  const exportedGpx = await gpxPromise;
-  assert.ok(exportedGpx.includes('<gpx version="1.1"'));
-  console.log('  ✓ export_gpx returned valid GPX content via Socket.IO');
+
+  hostClient.emit('transit_stop');
+  const stoppedCoins = await transitStopCoinsPromise;
+  assert.strictEqual(stoppedCoins.coins, 160);
+  console.log(`  ✓ Transit stopped. Deducted 90 coins (3 min * 30). New balance: ${stoppedCoins.coins}`);
+
+  // Overdraft test: 10 minutes in TRAIN_TER (350 coins) -> balance becomes -190
+  console.log('\n[6] Testing transit overdraft penalties (suspect, veto, curse)...');
+  hostClient.emit('transit_start', { mode: 'TRAIN_TER' });
+  await new Promise((r) => setTimeout(r, 50));
+  session!.activeTransit!.startTime = Date.now() - 10 * 60 * 1000;
+
+  const suspectPromise = new Promise<{ isSuspect: boolean; reason?: string }>((resolve) => {
+    hunterClient.on('game:suspect_alert', (data) => resolve(data));
+  });
+  const vetoPromise = new Promise<{ vetoEndTime: number }>((resolve) => {
+    hunterClient.on('veto:started', (data) => resolve(data));
+  });
+  const cursePromise = new Promise<{ id: string; title: string; description: string; durationMinutes: number }>((resolve) => {
+    hostClient.on('runner:curse_triggered', (data) => resolve(data));
+  });
+
+  hostClient.emit('transit_stop');
+
+  const [suspectAlert, vetoAlert, curseAlert] = await Promise.all([
+    suspectPromise,
+    vetoPromise,
+    cursePromise,
+  ]);
+  assert.strictEqual(suspectAlert.isSuspect, true);
+  assert.ok(vetoAlert.vetoEndTime > Date.now());
+  assert.ok(curseAlert.title.length > 0);
+  console.log(`  ✓ Overdraft triggered! Suspect: ${suspectAlert.isSuspect}, Veto ends: ${new Date(vetoAlert.vetoEndTime).toLocaleTimeString()}, Curse: "${curseAlert.title}"`);
+
+  // 7. PING GPS (Hunters updated & Runner ping)
+  console.log('\n[7] Testing ping_gps & filtering...');
+  // Hunter sends GPS -> other hunters updated
+  const hunterGpsPromise = new Promise<Array<{ id: string; name: string; lat?: number; lng?: number }>>((resolve) => {
+    hunterClient.on('hunters:updated', (list) => resolve(list));
+  });
+
+  hunterClient.emit('ping_gps', {
+    lat: 43.6045,
+    lng: 1.4442,
+    timestamp: Date.now(),
+    speedKmH: 4.5,
+  });
+
+  const huntersList = await hunterGpsPromise;
+  assert.ok(huntersList.length >= 1);
+  assert.strictEqual(huntersList[0].lat, 43.6045);
+  console.log(`  ✓ Hunter GPS ping received and broadcasted to hunters list`);
+
+  // Runner sends GPS (with sonar curse active, immediate broadcast)
+  session!.activeCurseId = 'curse_sonar';
+  const runnerPingPromise = new Promise<{ lat: number; lng: number; timestamp: number; speedKmH: number }>((resolve) => {
+    hunterClient.on('runner:last_ping', (ping) => resolve(ping));
+  });
+
+  hostClient.emit('ping_gps', {
+    lat: 43.60455,
+    lng: 1.4442,
+    timestamp: Date.now(),
+    speedKmH: 12.0,
+  });
+
+  const runnerPing = await runnerPingPromise;
+  assert.strictEqual(runnerPing.lat, 43.60455);
+  console.log(`  ✓ Runner GPS ping broadcasted to Hunter (lat: ${runnerPing.lat}, speed: ${runnerPing.speedKmH} km/h)`);
+
+  // 8. CAPTURE LOGIC (15 meters)
+  console.log('\n[8] Testing hunter:attempt_capture and runner:confirm_captured...');
+  // Distance between 43.6045 and 43.60455 is ~5.5 meters -> in range!
+  const threatPromise = new Promise<{ inRange: boolean; hunterName: string; distance: number }>((resolve) => {
+    hostClient.on('capture:threat', (data) => resolve(data));
+  });
+
+  hunterClient.emit('hunter:attempt_capture');
+  const threatData = await threatPromise;
+  assert.strictEqual(threatData.inRange, true);
+  assert.ok(threatData.distance <= 15, 'Distance must be <= 15m');
+  console.log(`  ✓ Capture threat received by Runner! In range: ${threatData.inRange}, distance: ${threatData.distance}m`);
+
+  // Runner confirms captured
+  const gameEndedPromise = new Promise<{ winner: string; history: any[] }>((resolve) => {
+    hunterClient.on('game:ended', (data) => resolve(data));
+  });
+
+  hostClient.emit('runner:confirm_captured');
+  const gameEnded = await gameEndedPromise;
+  assert.strictEqual(gameEnded.winner, 'HUNTERS');
+  assert.ok(gameEnded.history.length >= 2, 'History must contain recorded pings');
+  console.log(`  ✓ Game ended confirmed! Winner: ${gameEnded.winner}, track history count: ${gameEnded.history.length}`);
+
+  // 9. CURSE BONUS
+  console.log('\n[9] Testing curse:accept bonus coins...');
+  const curseCoinsPromise = new Promise<{ coins: number }>((resolve) => {
+    hostClient.on('coins:updated', (data) => resolve(data));
+  });
+
+  const previousCoins = session!.runnerCoins;
+  hostClient.emit('curse:accept', { curseId: 'curse_speed_limit', coinReward: 50 });
+  const updatedCurseCoins = await curseCoinsPromise;
+  assert.strictEqual(updatedCurseCoins.coins, previousCoins + 50);
+  console.log(`  ✓ curse:accept credited +50 coins. New balance: ${updatedCurseCoins.coins}`);
 
   // Cleanup
   hostClient.disconnect();
@@ -244,9 +242,9 @@ async function runTests() {
   io.close();
   server.close();
 
-  console.log('\n======================================================');
-  console.log('🎉 ALL ARCHITECTURE TESTS PASSED SUCCESSFULLY! (10/10)');
-  console.log('======================================================\n');
+  console.log('\n================================================================');
+  console.log('🎉 ALL ANDROID-ALIGNED SOCKET.IO TESTS PASSED SUCCESSFULLY! (9/9)');
+  console.log('================================================================\n');
 }
 
 runTests().catch((err) => {
