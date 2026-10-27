@@ -12,23 +12,26 @@ apiRouter.get('/health', (_req: Request, res: Response) => {
     status: 'ok',
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
-    activeGamesCount: gameManager.listGames().length,
+    activeGamesCount: gameManager.listSessions().length,
   });
 });
 
 /**
- * List all active games (overview)
+ * List all active games overview
  */
 apiRouter.get('/api/games', (_req: Request, res: Response) => {
-  const games = gameManager.listGames().map((id) => {
-    const game = gameManager.getGame(id);
+  const games = gameManager.listSessions().map((code) => {
+    const session = gameManager.getSession(code);
     return {
-      gameId: id,
-      status: game?.status,
-      coins: game?.coins,
-      playersCount: Object.keys(game?.players || {}).length,
-      historyCount: game?.history.length || 0,
-      createdAt: game?.createdAt,
+      gameCode: code,
+      phase: session?.phase,
+      hostId: session?.hostId,
+      runnerId: session?.runnerId,
+      runnerCoins: session?.runnerCoins,
+      playersCount: session?.players.size || 0,
+      historyCount: session?.positionsHistory.length || 0,
+      activeTransit: session?.activeTransit,
+      jailTimeEndsAt: session?.jailTimeEndsAt,
     };
   });
 
@@ -36,31 +39,31 @@ apiRouter.get('/api/games', (_req: Request, res: Response) => {
 });
 
 /**
- * Get full state of a specific game
+ * Get full serialized state of a specific game
  */
-apiRouter.get('/api/games/:gameId', (req: Request, res: Response) => {
-  const gameId = String(req.params.gameId);
-  const game = gameManager.getGame(gameId);
+apiRouter.get('/api/games/:gameCode', (req: Request, res: Response) => {
+  const gameCode = String(req.params.gameCode);
+  const session = gameManager.getSession(gameCode);
 
-  if (!game) {
-    return res.status(404).json({ error: `Game "${gameId}" not found.` });
+  if (!session) {
+    return res.status(404).json({ error: `Game session "${gameCode}" not found.` });
   }
 
-  return res.json({ game });
+  return res.json({ session: gameManager.serializeSession(session) });
 });
 
 /**
  * Export GPX file as downloadable attachment
  */
-apiRouter.get('/api/games/:gameId/gpx', (req: Request, res: Response) => {
-  const gameId = String(req.params.gameId);
-  const result = gameManager.exportGpx(gameId);
+apiRouter.get('/api/games/:gameCode/gpx', (req: Request, res: Response) => {
+  const gameCode = String(req.params.gameCode);
+  const result = gameManager.exportGpx(gameCode);
 
   if (!result.success || !result.gpx) {
     return res.status(404).json({ error: result.error || 'GPX track not found.' });
   }
 
-  const filename = result.filename || `runaway_${gameId}.gpx`;
+  const filename = result.filename || `runaway_${gameCode}.gpx`;
 
   res.setHeader('Content-Type', 'application/gpx+xml; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

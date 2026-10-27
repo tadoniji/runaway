@@ -1,7 +1,7 @@
-import { Curse, TransitMode } from './types';
+import { ActiveCurse, GameSettings } from './types';
 
-// Transit cost in coins per minute
-export const TRANSIT_RATES: Record<TransitMode, number> = {
+// Default transport rates in coins / minute
+export const DEFAULT_TRANSPORT_RATES: Record<string, number> = {
   TRAIN_TER: 35,
   METRO: 30,
   TELEO: 25,
@@ -10,39 +10,47 @@ export const TRANSIT_RATES: Record<TransitMode, number> = {
   BUS_LOCAL: 6,
 };
 
-// Initial runner balance
-export const INITIAL_COINS = 250;
+// Default game settings
+export const DEFAULT_SETTINGS: GameSettings = {
+  pingIntervalMinutes: 10,
+  jailTimeMinutes: 15,
+  vetoDurationMinutes: 20,
+  captureRadiusMeters: 15,
+  transportRates: { ...DEFAULT_TRANSPORT_RATES },
+  challenges: [],
+};
 
-// Veto duration applied when balance drops below 0 (20 minutes)
-export const VETO_DURATION_MS = 20 * 60 * 1000;
+// Initial balance for the Runner
+export const INITIAL_RUNNER_COINS = 250;
 
-// Interval between regular hunter location pings (10 minutes)
-export const HUNTER_PING_INTERVAL_MS = 10 * 60 * 1000;
-
-// List of curses pool for overdraft penalties
-export const CURSE_POOL: Omit<Curse, 'id' | 'appliedAt'>[] = [
+// Currencies and penalties pool
+export const CURSE_TEMPLATES: Omit<ActiveCurse, 'id'>[] = [
   {
-    type: 'SONAR',
-    name: 'Sonar Permanent',
+    title: 'Sonar Permanent',
     description: 'Votre balise GPS diffuse votre position exacte aux chasseurs en temps réel à chaque ping.',
+    coinReward: 50,
+    type: 'SONAR',
     durationMs: 20 * 60 * 1000,
   },
   {
-    type: 'FREEZE',
-    name: 'Arrêt Forcé (Freeze)',
+    title: 'Arrêt Forcé (Freeze)',
     description: 'Le Runner doit s\'immobiliser immédiatement pendant 5 minutes sans pouvoir se déplacer.',
+    coinReward: 75,
+    type: 'FREEZE',
     durationMs: 5 * 60 * 1000,
   },
   {
-    type: 'SPEED_LIMIT',
-    name: 'Interdiction de Courir',
+    title: 'Interdiction de Courir',
     description: 'Le Runner n\'a le droit qu\'à la marche normale pendant les 15 prochaines minutes.',
+    coinReward: 40,
+    type: 'SPEED_LIMIT',
     durationMs: 15 * 60 * 1000,
   },
   {
-    type: 'NO_CHECK_IN',
-    name: 'Zone Interdite',
+    title: 'Zone Interdite',
     description: 'Interdiction d\'entrer dans les gares ou stations pendant la durée du véto.',
+    coinReward: 60,
+    type: 'NO_CHECK_IN',
     durationMs: 20 * 60 * 1000,
   },
 ];

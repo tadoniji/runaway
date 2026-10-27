@@ -1,4 +1,4 @@
-import { GpsPoint } from '../types';
+import { PositionPoint } from '../types';
 
 /**
  * Escapes XML special characters
@@ -23,21 +23,22 @@ function escapeXml(unsafe: string): string {
 }
 
 /**
- * Generates an authoritative standard GPX 1.1 file content from GPS track history
+ * Generates an authoritative standard GPX 1.1 file content from positions history
  */
-export function generateGpx(gameId: string, history: GpsPoint[]): string {
+export function generateGpx(gameCode: string, history: PositionPoint[]): string {
   const formattedTime = new Date().toISOString();
-  const safeGameId = escapeXml(gameId);
+  const safeGameCode = escapeXml(gameCode);
 
   const pointsXml = history
     .map((point) => {
       const isoTime = new Date(point.timestamp).toISOString();
       const eleTag = typeof point.altitude === 'number' ? `\n        <ele>${point.altitude}</ele>` : '';
       const speedTag = typeof point.speed === 'number' ? `\n        <speed>${point.speed}</speed>` : '';
-      const descTag = point.mode ? `\n        <desc>Mode: ${escapeXml(point.mode)}</desc>` : '';
+      const roleDesc = `Role: ${point.role}` + (point.mode ? ` | Mode: ${escapeXml(point.mode)}` : '');
 
       return `      <trkpt lat="${point.lat.toFixed(7)}" lon="${point.lng.toFixed(7)}">${eleTag}${speedTag}
-        <time>${isoTime}</time>${descTag}
+        <time>${isoTime}</time>
+        <desc>${roleDesc}</desc>
       </trkpt>`;
     })
     .join('\n');
@@ -48,12 +49,12 @@ export function generateGpx(gameId: string, history: GpsPoint[]): string {
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">
   <metadata>
-    <name>Runaway Manhunt Track - Game ${safeGameId}</name>
-    <desc>Complete authoritative GPS track export for game ${safeGameId}</desc>
+    <name>Runaway Manhunt Track - Game ${safeGameCode}</name>
+    <desc>Authoritative GPS track export for game ${safeGameCode}</desc>
     <time>${formattedTime}</time>
   </metadata>
   <trk>
-    <name>Runner Track - ${safeGameId}</name>
+    <name>Game Track - ${safeGameCode}</name>
     <trkseg>
 ${pointsXml}
     </trkseg>

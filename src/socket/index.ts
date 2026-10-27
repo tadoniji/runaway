@@ -22,11 +22,11 @@ export type AppSocket = Socket<
 >;
 
 /**
- * Helper to build standard room names
+ * Standard Room names
  */
-export const getGameRoom = (gameId: string) => `game:${gameId}`;
-export const getHunterRoom = (gameId: string) => `game:${gameId}:hunters`;
-export const getRunnerRoom = (gameId: string) => `game:${gameId}:runners`;
+export const getGameRoom = (gameCode: string) => `game:${gameCode.toUpperCase()}`;
+export const getHunterRoom = (gameCode: string) => `game:${gameCode.toUpperCase()}:hunters`;
+export const getRunnerRoom = (gameCode: string) => `game:${gameCode.toUpperCase()}:runners`;
 
 export function setupSocketHandlers(io: AppSocketServer): void {
   const gameManager = GameManager.getInstance();
@@ -34,231 +34,444 @@ export function setupSocketHandlers(io: AppSocketServer): void {
   io.on('connection', (socket: AppSocket) => {
     console.log(`[Socket.IO] Client connected: ${socket.id}`);
 
-    // 1. JOIN_GAME
+    // Helper to extract gameCode
+    const resolveGameCode = (payload?: { gameCode?: string; gameId?: string }): string | undefined => {
+      const code = payload?.gameCode || payload?.gameId || socket.data.gameCode;
+      return code ? code.trim().toUpperCase() : undefined;
+    };
+
+    // 1. CREATE_GAME
+    socket.on('create_game', (payload, callback) => {
+      try {
+        const { hostName, avatarUrl, wantsRunner, settings } = payload;
+        const session = gameManager.createGame(
+          socket.id,
+          hostName,
+          avatarUrl,
+          wantsRunner,
+          settings
+        );
+
+        socket.data.gameCode = session.gameCode;
+        socket.data.playerId = socket.id;
+        socket.data.name = hostName;
+        socket.data.role = wantsRunner ? 'RUNNER' : 'UNDECIDED';
+
+        const gameRoom = getGameRoom(session.gameCode);
+        socket.join(gameRoom);
+        if (socket.data.role === 'RUNNER') {
+          socket.join(getRunnerRoom(session.gameCode));
+        }
+
+        console.log(`[Lobby] Game created: "${session.gameCode}" by "${hostName}"`);
+        const serialized = gameManager.serializeSession(session);
+        callback?.({ success: true, gameCode: session.gameCode, session: serialized });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Erreur lors de la création de la partie';
+        socket.emit('error_message', { code: 'CREATE_ERROR', message });
+        callback?.({ success: false, error: message });
+      }
+    });
+
+    // 2. JOIN_GAME
     socket.on('join_game', (payload, callback) => {
       try {
-        const { gameId, role, name } = payload;
-        if (!gameId || !role) {
-          const errMsg = 'gameId et role ("RUNNER" | "HUNTER") sont obligatoires.';
-          socket.emit('error_message', { code: 'INVALID_PAYLOAD', message: errMsg });
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) {
+          const errMsg = 'Le code de partie (gameCode) est obligatoire.';
+          socket.emit('error_message', { code: 'MISSING_GAME_CODE', message: errMsg });
           callback?.({ success: false, error: errMsg });
           return;
         }
 
-        // Store identity in socket data
-        socket.data.gameId = gameId;
-        socket.data.playerId = socket.id;
-        socket.data.role = role;
-        socket.data.name = name;
-
-        // Join Socket.IO rooms
-        const gameRoom = getGameRoom(gameId);
-        const roleRoom = role === 'HUNTER' ? getHunterRoom(gameId) : getRunnerRoom(gameId);
-
-        socket.join(gameRoom);
-        socket.join(roleRoom);
-
-        // Register in GameManager
-        const { game, player } = gameManager.addPlayer(gameId, {
+        const { session, player } = gameManager.addPlayer(gameCode, {
           id: socket.id,
-          role,
-          name,
+          name: payload.name,
+          avatarUrl: payload.avatarUrl,
+          wantsRunner: payload.wantsRunner,
+          role: payload.role,
         });
 
-        console.log(`[Socket.IO] Player "${player.name}" (${player.role}) joined game "${gameId}"`);
+        socket.data.gameCode = session.gameCode;
+        socket.data.playerId = socket.id;
+        socket.data.role = player.role;
+        socket.data.name = player.name;
 
-        // Notify other room members
+        const gameRoom = getGameRoom(session.gameCode);
+        socket.join(gameRoom);
+
+        if (player.role === 'RUNNER') {
+          socket.join(getRunnerRoom(session.gameCode));
+        } else if (player.role === 'HUNTER') {
+          socket.join(getHunterRoom(session.gameCode));
+        }
+
+        console.log(`[Lobby] Player "${player.name}" joined game "${session.gameCode}"`);
+
+        const serialized = gameManager.serializeSession(session);
         socket.to(gameRoom).emit('player_joined', player);
+        io.to(gameRoom).emit('game_state_update', serialized);
 
-        // Send updated state to all in the game
-        io.to(gameRoom).emit('game_state_update', game);
-
-        callback?.({ success: true, state: game });
+        callback?.({ success: true, session: serialized });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Erreur interne lors du join_game';
+        const message = err instanceof Error ? err.message : 'Erreur lors de la connexion à la session';
         socket.emit('error_message', { code: 'JOIN_ERROR', message });
         callback?.({ success: false, error: message });
       }
     });
 
-    // 2. TRANSIT_START
-    socket.on('transit_start', (payload, callback) => {
+    // 3. SET_READY
+    socket.on('set_ready', (payload, callback) => {
       try {
-        const gameId = payload?.gameId || socket.data.gameId;
-        if (!gameId) {
-          const errMsg = 'gameId manquant pour transit_start.';
-          socket.emit('error_message', { code: 'MISSING_GAME_ID', message: errMsg });
-          callback?.({ success: false, error: errMsg });
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) return;
+
+        const result = gameManager.setPlayerReady(gameCode, socket.id, payload.isReady);
+        if (result.success && result.session) {
+          const serialized = gameManager.serializeSession(result.session);
+          io.to(getGameRoom(gameCode)).emit('game_state_update', serialized);
+          callback?.({ success: true, session: serialized });
+        } else {
+          callback?.({ success: false, error: result.error });
+        }
+      } catch (err) {
+        callback?.({ success: false, error: 'Erreur set_ready' });
+      }
+    });
+
+    // 4. SET_WANTS_RUNNER
+    socket.on('set_wants_runner', (payload, callback) => {
+      try {
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) return;
+
+        const result = gameManager.setWantsRunner(gameCode, socket.id, payload.wantsRunner);
+        if (result.success && result.session) {
+          const serialized = gameManager.serializeSession(result.session);
+          io.to(getGameRoom(gameCode)).emit('game_state_update', serialized);
+          callback?.({ success: true, session: serialized });
+        } else {
+          callback?.({ success: false, error: result.error });
+        }
+      } catch (err) {
+        callback?.({ success: false, error: 'Erreur set_wants_runner' });
+      }
+    });
+
+    // 5. UPDATE_SETTINGS (Host only)
+    socket.on('update_settings', (payload, callback) => {
+      try {
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) return;
+
+        const result = gameManager.updateSettings(gameCode, socket.id, payload.settings);
+        if (result.success && result.session) {
+          const serialized = gameManager.serializeSession(result.session);
+          io.to(getGameRoom(gameCode)).emit('game_state_update', serialized);
+          callback?.({ success: true, session: serialized });
+        } else {
+          callback?.({ success: false, error: result.error });
+        }
+      } catch (err) {
+        callback?.({ success: false, error: 'Erreur update_settings' });
+      }
+    });
+
+    // 6. ASSIGN_ROLE (Host only)
+    socket.on('assign_role', (payload, callback) => {
+      try {
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) return;
+
+        const result = gameManager.assignRole(
+          gameCode,
+          socket.id,
+          payload.targetPlayerId,
+          payload.role
+        );
+        if (result.success && result.session) {
+          const targetSocket = io.sockets.sockets.get(payload.targetPlayerId);
+          if (targetSocket) {
+            targetSocket.data.role = payload.role;
+            if (payload.role === 'RUNNER') {
+              targetSocket.join(getRunnerRoom(gameCode));
+              targetSocket.leave(getHunterRoom(gameCode));
+            } else if (payload.role === 'HUNTER') {
+              targetSocket.join(getHunterRoom(gameCode));
+              targetSocket.leave(getRunnerRoom(gameCode));
+            }
+          }
+
+          const serialized = gameManager.serializeSession(result.session);
+          io.to(getGameRoom(gameCode)).emit('game_state_update', serialized);
+          callback?.({ success: true, session: serialized });
+        } else {
+          callback?.({ success: false, error: result.error });
+        }
+      } catch (err) {
+        callback?.({ success: false, error: 'Erreur assign_role' });
+      }
+    });
+
+    // 7. START_GAME (Host only)
+    socket.on('start_game', (payload, callback) => {
+      try {
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) return;
+
+        const result = gameManager.startGame(gameCode, socket.id);
+        if (!result.success || !result.session) {
+          callback?.({ success: false, error: result.error });
           return;
         }
 
-        const result = gameManager.startTransit(gameId, socket.id, payload.mode);
-        if (!result.success || !result.game) {
-          const errMsg = result.error || 'Impossible de démarrer le transit.';
+        const gameRoom = getGameRoom(gameCode);
+        const serialized = gameManager.serializeSession(result.session);
+
+        // Update room memberships according to final roles
+        result.session.players.forEach((player) => {
+          const s = io.sockets.sockets.get(player.id);
+          if (s) {
+            s.data.role = player.role;
+            if (player.role === 'RUNNER') {
+              s.join(getRunnerRoom(gameCode));
+              s.leave(getHunterRoom(gameCode));
+            } else {
+              s.join(getHunterRoom(gameCode));
+              s.leave(getRunnerRoom(gameCode));
+            }
+          }
+        });
+
+        io.to(gameRoom).emit('phase_changed', {
+          phase: result.session.phase,
+          jailTimeEndsAt: result.session.jailTimeEndsAt,
+        });
+        io.to(gameRoom).emit('game_state_update', serialized);
+
+        console.log(`[Game] Started in mode "${result.session.phase}" for game "${gameCode}"`);
+        callback?.({ success: true, session: serialized });
+      } catch (err) {
+        callback?.({ success: false, error: 'Erreur start_game' });
+      }
+    });
+
+    // 8. TRANSIT_START
+    socket.on('transit_start', (payload, callback) => {
+      try {
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) {
+          callback?.({ success: false, error: 'gameCode manquant' });
+          return;
+        }
+
+        const result = gameManager.startTransit(gameCode, socket.id, payload.mode);
+        if (!result.success || !result.session) {
+          const errMsg = result.error || 'Impossible de démarrer le transport';
           socket.emit('error_message', { code: 'TRANSIT_START_REJECTED', message: errMsg });
           callback?.({ success: false, error: errMsg });
           return;
         }
 
-        const gameRoom = getGameRoom(gameId);
-        if (result.game.activeTransit) {
-          io.to(gameRoom).emit('transit_started', result.game.activeTransit);
-        }
-        io.to(gameRoom).emit('game_state_update', result.game);
+        const gameRoom = getGameRoom(gameCode);
+        const serialized = gameManager.serializeSession(result.session);
 
-        console.log(`[Transit] Runner started "${payload.mode}" in game "${gameId}"`);
-        callback?.({ success: true, state: result.game });
+        if (result.session.activeTransit) {
+          io.to(gameRoom).emit('transit_started', result.session.activeTransit);
+        }
+        io.to(gameRoom).emit('game_state_update', serialized);
+
+        callback?.({ success: true, session: serialized });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Erreur lors du démarrage du transit';
-        socket.emit('error_message', { code: 'TRANSIT_START_ERROR', message });
-        callback?.({ success: false, error: message });
+        callback?.({ success: false, error: 'Erreur transit_start' });
       }
     });
 
-    // 3. TRANSIT_STOP
+    // 9. TRANSIT_STOP
     socket.on('transit_stop', (payload, callback) => {
       try {
-        const gameId = payload?.gameId || socket.data.gameId;
-        if (!gameId) {
-          const errMsg = 'gameId manquant pour transit_stop.';
-          socket.emit('error_message', { code: 'MISSING_GAME_ID', message: errMsg });
-          callback?.({ success: false, error: errMsg });
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) {
+          callback?.({ success: false, error: 'gameCode manquant' });
           return;
         }
 
-        const result = gameManager.stopTransit(gameId, socket.id);
-        if (!result.success || !result.game || !result.report) {
-          const errMsg = result.error || 'Impossible d\'arrêter le transit.';
+        const result = gameManager.stopTransit(gameCode, socket.id);
+        if (!result.success || !result.session || !result.report) {
+          const errMsg = result.error || 'Impossible d\'arrêter le transport';
           socket.emit('error_message', { code: 'TRANSIT_STOP_REJECTED', message: errMsg });
           callback?.({ success: false, error: errMsg });
           return;
         }
 
-        const gameRoom = getGameRoom(gameId);
-        const hunterRoom = getHunterRoom(gameId);
+        const gameRoom = getGameRoom(gameCode);
+        const hunterRoom = getHunterRoom(gameCode);
+        const serialized = gameManager.serializeSession(result.session);
 
-        // Notify everyone about transit completion and cost breakdown
         io.to(gameRoom).emit('transit_stopped', result.report);
 
-        // If overdraft occurred: trigger suspect alert to hunters
-        if (result.report.penaltiesApplied && result.report.curseApplied && result.report.vetoUntil) {
-          console.warn(`[Transit] OVERDRAFT! Game "${gameId}" coins: ${result.game.coins}. Suspect alert triggered.`);
+        if (result.report.penaltiesApplied && result.report.vetoUntil) {
           const alertPayload = {
-            reason: `Le Runner est à découvert (${result.game.coins} coins) après son trajet en ${result.report.mode}.`,
-            coins: result.game.coins,
+            reason: `Le Runner est à découvert (${result.session.runnerCoins} coins) après son trajet en ${result.report.mode}.`,
+            coins: result.session.runnerCoins,
             vetoUntil: result.report.vetoUntil,
             curse: result.report.curseApplied,
           };
-
-          // Broadcast alert to hunters
           io.to(hunterRoom).emit('suspect_alert', alertPayload);
-          // Also inform the runner
           socket.emit('suspect_alert', alertPayload);
         }
 
-        io.to(gameRoom).emit('game_state_update', result.game);
+        io.to(gameRoom).emit('game_state_update', serialized);
 
-        callback?.({
-          success: true,
-          report: result.report,
-          state: result.game,
-        });
+        callback?.({ success: true, report: result.report, session: serialized });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Erreur lors de l\'arrêt du transit';
-        socket.emit('error_message', { code: 'TRANSIT_STOP_ERROR', message });
-        callback?.({ success: false, error: message });
+        callback?.({ success: false, error: 'Erreur transit_stop' });
       }
     });
 
-    // 4. PING_GPS
+    // 10. PING_GPS
     socket.on('ping_gps', (payload, callback) => {
       try {
-        const gameId = payload?.gameId || socket.data.gameId;
-        if (!gameId) {
-          const errMsg = 'gameId manquant pour ping_gps.';
-          socket.emit('error_message', { code: 'MISSING_GAME_ID', message: errMsg });
-          callback?.({ success: false, broadcasted: false, error: errMsg });
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) {
+          callback?.({ success: false, broadcasted: false, error: 'gameCode manquant' });
           return;
         }
 
         if (typeof payload.lat !== 'number' || typeof payload.lng !== 'number') {
-          const errMsg = 'Coordonnées GPS invalides (lat et lng doivent être des nombres).';
-          socket.emit('error_message', { code: 'INVALID_COORDINATES', message: errMsg });
-          callback?.({ success: false, broadcasted: false, error: errMsg });
+          callback?.({ success: false, broadcasted: false, error: 'Coordonnées GPS invalides' });
           return;
         }
 
-        const result = gameManager.recordGpsPing(gameId, socket.id, {
+        const result = gameManager.recordPosition(gameCode, socket.id, {
           lat: payload.lat,
           lng: payload.lng,
           altitude: payload.altitude,
           speed: payload.speed,
         });
 
-        if (!result.success) {
-          socket.emit('error_message', { code: 'GPS_PING_REJECTED', message: result.error || 'Erreur' });
+        if (!result.success || !result.session) {
           callback?.({ success: false, broadcasted: false, error: result.error });
           return;
         }
 
-        // If condition met (periodic ping or sonar curse), broadcast to hunters room
+        const hunterRoom = getHunterRoom(gameCode);
+
+        // If Runner broadcast is due
         if (result.broadcastToHunters && result.ping) {
-          const hunterRoom = getHunterRoom(gameId);
-          console.log(`[GPS] Broadcasting location to hunters for game "${gameId}" (reason: ${result.ping.triggerReason})`);
           io.to(hunterRoom).emit('hunter_ping', result.ping);
+        }
+
+        // If Hunter moved, broadcast location to other hunters
+        if (socket.data.role === 'HUNTER') {
+          socket.to(hunterRoom).emit('hunter_location_update', {
+            hunterId: socket.id,
+            name: socket.data.name || 'Hunter',
+            lat: payload.lat,
+            lng: payload.lng,
+          });
+        }
+
+        // Notify hunters if capture is within reach
+        if (result.captureOpportunity && result.distanceToRunner !== undefined) {
+          io.to(hunterRoom).emit('capture_opportunity', {
+            hunterId: socket.id,
+            distanceMeters: result.distanceToRunner,
+          });
         }
 
         callback?.({
           success: true,
           broadcasted: result.broadcastToHunters,
+          distanceToRunner: result.distanceToRunner,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Erreur lors du traitement du ping GPS';
-        socket.emit('error_message', { code: 'GPS_PING_ERROR', message });
-        callback?.({ success: false, broadcasted: false, error: message });
+        callback?.({ success: false, broadcasted: false, error: 'Erreur ping_gps' });
       }
     });
 
-    // 5. EXPORT_GPX
-    socket.on('export_gpx', (payload, callback) => {
+    // 11. ATTEMPT_CAPTURE
+    socket.on('attempt_capture', (payload, callback) => {
       try {
-        const gameId = payload?.gameId || socket.data.gameId;
-        if (!gameId) {
-          const errMsg = 'gameId manquant pour export_gpx.';
-          socket.emit('error_message', { code: 'MISSING_GAME_ID', message: errMsg });
-          callback?.({ success: false, error: errMsg });
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) return;
+
+        const result = gameManager.attemptCapture(gameCode, socket.id);
+        if (!result.success || !result.session) {
+          callback?.({ success: false, captured: false, error: result.error });
           return;
         }
 
-        const result = gameManager.exportGpx(gameId);
+        const gameRoom = getGameRoom(gameCode);
+        const serialized = gameManager.serializeSession(result.session);
+
+        io.to(gameRoom).emit('runner_captured', {
+          hunterId: socket.id,
+          hunterName: result.hunterName || 'Hunter',
+          timestamp: Date.now(),
+        });
+        io.to(gameRoom).emit('phase_changed', {
+          phase: 'CAPTURED',
+          jailTimeEndsAt: null,
+        });
+        io.to(gameRoom).emit('game_state_update', serialized);
+
+        callback?.({ success: true, captured: true, distanceMeters: result.distanceMeters });
+      } catch (err) {
+        callback?.({ success: false, error: 'Erreur attempt_capture' });
+      }
+    });
+
+    // 12. ACCEPT_CURSE
+    socket.on('accept_curse', (payload, callback) => {
+      try {
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) return;
+
+        const result = gameManager.acceptCurse(gameCode, socket.id, payload.curse);
+        if (result.success && result.session) {
+          const serialized = gameManager.serializeSession(result.session);
+          io.to(getGameRoom(gameCode)).emit('game_state_update', serialized);
+          callback?.({ success: true, session: serialized });
+        } else {
+          callback?.({ success: false, error: result.error });
+        }
+      } catch (err) {
+        callback?.({ success: false, error: 'Erreur accept_curse' });
+      }
+    });
+
+    // 13. EXPORT_GPX
+    socket.on('export_gpx', (payload, callback) => {
+      try {
+        const gameCode = resolveGameCode(payload);
+        if (!gameCode) return;
+
+        const result = gameManager.exportGpx(gameCode);
         if (!result.success || !result.gpx) {
-          const errMsg = result.error || 'Export GPX impossible.';
-          socket.emit('error_message', { code: 'GPX_EXPORT_ERROR', message: errMsg });
-          callback?.({ success: false, error: errMsg });
+          callback?.({ success: false, error: result.error });
           return;
         }
 
         socket.emit('gpx_exported', {
           gpx: result.gpx,
-          filename: result.filename || `game_${gameId}.gpx`,
+          filename: result.filename || `game_${gameCode}.gpx`,
         });
-
         callback?.({ success: true, gpx: result.gpx });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Erreur lors de l\'export GPX';
-        socket.emit('error_message', { code: 'GPX_EXPORT_EXCEPTION', message });
-        callback?.({ success: false, error: message });
+        callback?.({ success: false, error: 'Erreur export_gpx' });
       }
     });
 
     // DISCONNECT
     socket.on('disconnect', (reason) => {
       console.log(`[Socket.IO] Client disconnected: ${socket.id} (reason: ${reason})`);
-      const { game, removedPlayer } = gameManager.removePlayer(socket.id);
-      if (game && removedPlayer) {
-        const gameRoom = getGameRoom(game.gameId);
+      const { session, removedPlayer } = gameManager.removePlayer(socket.id);
+      if (session && removedPlayer) {
+        const gameRoom = getGameRoom(session.gameCode);
         socket.to(gameRoom).emit('player_left', socket.id);
-        io.to(gameRoom).emit('game_state_update', game);
+        const serialized = gameManager.serializeSession(session);
+        io.to(gameRoom).emit('game_state_update', serialized);
       }
     });
   });
