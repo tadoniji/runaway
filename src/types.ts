@@ -64,42 +64,86 @@ export interface GameSession {
 }
 
 // ==========================================
-// SOCKET.IO EVENT CONTRACTS (Android Client Aligned)
+// SOCKET.IO EVENT CONTRACTS (Android Client & Legacy Aligned)
 // ==========================================
 
 export interface ClientToServerEvents {
-  create_game: (payload: {
-    name: string;
+  create_game: (
+    payload: {
+      gameId?: string;
+      gameCode?: string;
+      name: string;
+      wantsToBeRunner?: boolean;
+      initialCoins?: number;
+      jailTimeMinutes?: number;
+    },
+    callback?: (response: any) => void
+  ) => void;
+
+  join_game: (
+    payload: {
+      gameId?: string;
+      gameCode?: string;
+      playerId?: string;
+      role?: string;
+      name: string;
+      wantsToBeRunner?: boolean;
+      avatarUri?: string;
+    },
+    callback?: (response: any) => void
+  ) => void;
+
+  'player:toggle_ready': (payload: {
+    gameCode?: string;
+    gameId?: string;
+    name?: string;
+    isReady?: boolean;
+    role?: string;
+  }) => void;
+
+  'player:toggle_wants_runner': (payload: {
+    gameCode?: string;
+    gameId?: string;
+    name?: string;
     wantsToBeRunner?: boolean;
-    initialCoins?: number;
-    jailTimeMinutes?: number;
   }) => void;
 
-  join_game: (payload: {
-    gameId: string;
-    playerId: string;
-    role: string;
-    name: string;
-    wantsToBeRunner?: boolean;
-    avatarUri?: string;
+  start_game: (payload: {
+    gameCode?: string;
+    gameId?: string;
+    runnerId?: string;
+    runnerName?: string;
   }) => void;
 
-  'player:toggle_ready': (payload: { gameCode: string }) => void;
-
-  'player:toggle_wants_runner': (payload: { gameCode: string }) => void;
-
-  start_game: (payload: { gameCode: string }) => void;
-
-  transit_start: (payload: { mode: string }) => void;
-
-  transit_stop: () => void;
-
-  ping_gps: (payload: {
-    lat: number;
-    lng: number;
-    timestamp: number;
-    speedKmH?: number;
+  'game:start': (payload: {
+    gameCode?: string;
+    gameId?: string;
+    runnerId?: string;
+    runnerName?: string;
   }) => void;
+
+  transit_start: (
+    payload: { mode: string; gameId?: string },
+    callback?: (response: any) => void
+  ) => void;
+
+  transit_stop: (
+    payload?: { gameId?: string },
+    callback?: (response: any) => void
+  ) => void;
+
+  ping_gps: (
+    payload: {
+      gameId?: string;
+      lat: number;
+      lng: number;
+      timestamp?: number;
+      speed?: number;
+      speedKmH?: number;
+      altitude?: number;
+    },
+    callback?: (response: any) => void
+  ) => void;
 
   'curse:accept': (payload: { curseId: string; coinReward: number }) => void;
 
@@ -108,6 +152,11 @@ export interface ClientToServerEvents {
   'hunter:attempt_capture': () => void;
 
   'runner:confirm_captured': () => void;
+
+  export_gpx: (
+    payload: { gameId?: string; gameCode?: string },
+    callback?: (response: any) => void
+  ) => void;
 }
 
 export interface ServerToClientEvents {
@@ -121,9 +170,35 @@ export interface ServerToClientEvents {
     jailTimeEndTime: number;
   }) => void;
 
+  game_started: (payload: {
+    runnerId: string;
+    stage: string;
+    jailTimeEndTime: number;
+  }) => void;
+
+  game_state_update: (payload: any) => void;
+
+  player_joined: (payload: any) => void;
+
+  player_left: (payload: any) => void;
+
   'coins:updated': (payload: { coins: number }) => void;
 
-  'game:suspect_alert': (payload: { isSuspect: boolean; reason?: string }) => void;
+  'game:suspect_alert': (payload: {
+    isSuspect: boolean;
+    reason?: string;
+    coins?: number;
+    vetoUntil?: number;
+    curse?: any;
+  }) => void;
+
+  suspect_alert: (payload: {
+    isSuspect?: boolean;
+    reason?: string;
+    coins?: number;
+    vetoUntil?: number;
+    curse?: any;
+  }) => void;
 
   'veto:started': (payload: { vetoEndTime: number }) => void;
 
@@ -142,6 +217,14 @@ export interface ServerToClientEvents {
     avatarUri?: string;
   }) => void;
 
+  hunter_ping: (payload: {
+    lat: number;
+    lng: number;
+    timestamp: number;
+    speedKmH: number;
+    avatarUri?: string;
+  }) => void;
+
   'hunters:updated': (
     payload: Array<{ id: string; name: string; lat?: number; lng?: number }>
   ) => void;
@@ -153,6 +236,12 @@ export interface ServerToClientEvents {
   }) => void;
 
   'game:ended': (payload: { winner: string; history: any[] }) => void;
+
+  transit_started: (payload: any) => void;
+
+  transit_stopped: (payload: any) => void;
+
+  gpx_exported: (payload: { gpx: string; filename: string }) => void;
 
   error_message?: (payload: { code: string; message: string }) => void;
 }

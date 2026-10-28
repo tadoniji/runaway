@@ -20,7 +20,7 @@ apiRouter.get('/health', (_req: Request, res: Response) => {
  * List all active games overview
  */
 apiRouter.get('/api/games', (_req: Request, res: Response) => {
-  const games = gameManager.listSessions().map((code) => {
+  const games = gameManager.listSessions().map((code: string) => {
     const session = gameManager.getSession(code);
     return {
       gameCode: code,

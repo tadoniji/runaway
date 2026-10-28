@@ -54,19 +54,23 @@ export class GameManager {
   public createGame(
     hostSocketId: string,
     payload: {
+      gameId?: string;
+      gameCode?: string;
       name: string;
       wantsToBeRunner?: boolean;
       initialCoins?: number;
       jailTimeMinutes?: number;
     }
   ): { session: GameSession; player: Player } {
-    const gameCode = this.generateGameCode();
+    const requestedCode = (payload.gameId || payload.gameCode || '').trim().toUpperCase();
+    const gameCode = requestedCode.length === 6 ? requestedCode : this.generateGameCode();
     const now = Date.now();
     const initialCoins = payload.initialCoins ?? DEFAULT_INITIAL_COINS;
     const jailTimeMinutes = payload.jailTimeMinutes ?? DEFAULT_JAIL_TIME_MINUTES;
 
     const hostPlayer: Player = {
       id: hostSocketId,
+      playerId: hostSocketId,
       name: payload.name.trim() || 'Host',
       role: payload.wantsToBeRunner ? 'RUNNER' : 'UNDECIDED',
       wantsToBeRunner: payload.wantsToBeRunner ?? false,
@@ -167,12 +171,13 @@ export class GameManager {
   }
 
   /**
-   * Joins an existing game
+   * Joins an existing game with reconnection / re-association support
    */
   public joinGame(
     socketId: string,
     payload: {
-      gameId: string;
+      gameId?: string;
+      gameCode?: string;
       playerId?: string;
       role?: string;
       name: string;
@@ -180,10 +185,49 @@ export class GameManager {
       avatarUri?: string;
     }
   ): { session: GameSession; player: Player } {
-    const gameCode = payload.gameId.trim().toUpperCase();
+    const rawCode = payload.gameId || payload.gameCode || 'DEFAULT';
+    const gameCode = rawCode.trim().toUpperCase();
     const session = this.getOrCreateSession(gameCode, socketId);
     const now = Date.now();
 
+    const normalizedName = payload.name.trim();
+
+    // Check if player already exists in this session by name or playerId (Reconnection handling)
+    const existingEntry = Array.from(session.players.entries()).find(([oldSockId, p]) => {
+      const matchPlayerId = payload.playerId && p.playerId === payload.playerId;
+      const matchName = normalizedName && p.name.toLowerCase() === normalizedName.toLowerCase();
+      return matchPlayerId || matchName;
+    });
+
+    if (existingEntry) {
+      const [oldSockId, existingPlayer] = existingEntry;
+
+      // Clean up previous socket mapping if socket changed
+      if (oldSockId !== socketId) {
+        session.players.delete(oldSockId);
+        this.socketToGame.delete(oldSockId);
+      }
+
+      existingPlayer.id = socketId;
+      existingPlayer.lastSeen = now;
+      if (payload.avatarUri) existingPlayer.avatarUri = payload.avatarUri;
+      if (payload.wantsToBeRunner !== undefined) existingPlayer.wantsToBeRunner = payload.wantsToBeRunner;
+
+      session.players.set(socketId, existingPlayer);
+      this.socketToGame.set(socketId, session.gameCode);
+
+      if (session.runnerId === oldSockId) {
+        session.runnerId = socketId;
+      }
+      if (session.hostId === oldSockId) {
+        session.hostId = socketId;
+      }
+
+      console.log(`[Reconnection] Player "${existingPlayer.name}" reconnected with new socket ${socketId}`);
+      return { session, player: existingPlayer };
+    }
+
+    // Brand new player joining
     const roleUpper = payload.role?.toUpperCase();
     const role: PlayerRole =
       roleUpper === 'RUNNER'
@@ -197,7 +241,7 @@ export class GameManager {
     const player: Player = {
       id: socketId,
       playerId: payload.playerId || socketId,
-      name: payload.name.trim() || `Player_${socketId.slice(0, 4)}`,
+      name: normalizedName || `Player_${socketId.slice(0, 4)}`,
       role,
       wantsToBeRunner: payload.wantsToBeRunner ?? (role === 'RUNNER'),
       isReady: false,
@@ -247,9 +291,9 @@ export class GameManager {
   }
 
   /**
-   * Starts game with weighted selection of runner
+   * Starts game with runner selection
    */
-  public startGame(gameCode: string): {
+  public startGame(gameCode: string, designatedRunnerNameOrId?: string): {
     success: boolean;
     session?: GameSession;
     runner?: Player;
@@ -262,25 +306,35 @@ export class GameManager {
     const playersList = Array.from(session.players.values());
     if (playersList.length === 0) return { success: false, error: 'Aucun joueur.' };
 
-    // Weighted selection of runner:
-    // Volunteers have a weight of 10, non-volunteers have a weight of 1.
-    // If no one volunteered, all players have equal probability.
-    const hasVolunteers = playersList.some((p) => p.wantsToBeRunner);
-    const weightedPool: Player[] = [];
+    let chosenRunner: Player | undefined;
 
-    playersList.forEach((p) => {
-      const weight = hasVolunteers ? (p.wantsToBeRunner ? 10 : 1) : 1;
-      for (let i = 0; i < weight; i++) {
-        weightedPool.push(p);
-      }
-    });
+    // Check if a specific runner was requested by the host
+    if (designatedRunnerNameOrId) {
+      chosenRunner = playersList.find(
+        (p) => p.id === designatedRunnerNameOrId || p.playerId === designatedRunnerNameOrId || p.name.toLowerCase() === designatedRunnerNameOrId.toLowerCase()
+      );
+    }
 
-    const chosenRunner = weightedPool[Math.floor(Math.random() * weightedPool.length)];
+    if (!chosenRunner) {
+      // Weighted selection: Volunteers have 10x chance
+      const hasVolunteers = playersList.some((p) => p.wantsToBeRunner);
+      const weightedPool: Player[] = [];
+
+      playersList.forEach((p) => {
+        const weight = hasVolunteers ? (p.wantsToBeRunner ? 10 : 1) : 1;
+        for (let i = 0; i < weight; i++) {
+          weightedPool.push(p);
+        }
+      });
+
+      chosenRunner = weightedPool[Math.floor(Math.random() * weightedPool.length)];
+    }
+
     session.runnerId = chosenRunner.id;
 
     // Assign roles
     playersList.forEach((p) => {
-      if (p.id === chosenRunner.id) {
+      if (p.id === chosenRunner!.id) {
         p.role = 'RUNNER';
       } else {
         p.role = 'HUNTER';
@@ -356,6 +410,17 @@ export class GameManager {
     isOverdraft?: boolean;
     curse?: CurseTemplate;
     vetoEndTime?: number;
+    mode?: string;
+    durationMinutes?: number;
+    report?: {
+      mode: string;
+      durationMinutes: number;
+      coinsDeducted: number;
+      newCoinsBalance: number;
+      penaltiesApplied: boolean;
+      curseApplied?: CurseTemplate;
+      vetoUntil?: number;
+    };
     error?: string;
   } {
     const session = this.getSessionBySocketId(socketId);
@@ -363,20 +428,19 @@ export class GameManager {
 
     const player = session.players.get(socketId);
     if (!player || player.role !== 'RUNNER') {
-      return { success: false, error: 'Seul le Runner peut arrêter son transit.' };
+      return { success: false, error: 'Seul le Runner peut arrêter un transit.' };
     }
 
     if (!session.activeTransit) {
-      return { success: false, error: 'Aucun transit actif.' };
+      return { success: false, error: 'Aucun transit en cours.' };
     }
 
-    const now = Date.now();
     const { mode, startTime } = session.activeTransit;
-    const elapsedSeconds = Math.max(0, Math.round((now - startTime) / 1000));
-    const durationMinutes = elapsedSeconds / 60;
+    const now = Date.now();
+    const elapsedMinutes = Math.max(1, Math.ceil((now - startTime) / (60 * 1000)));
 
-    const rate = session.settings.transportRates[mode] ?? 15;
-    const coinsDeducted = Math.ceil(durationMinutes * rate);
+    const rate = session.settings.transportRates[mode] ?? TRANSIT_RATES[mode] ?? 25;
+    const coinsDeducted = elapsedMinutes * rate;
 
     session.runnerCoins -= coinsDeducted;
     session.activeTransit = null;
@@ -388,12 +452,23 @@ export class GameManager {
     if (session.runnerCoins < 0) {
       isOverdraft = true;
       session.isSuspect = true;
-      vetoEndTime = now + (session.settings.vetoDurationMinutes || 20) * 60 * 1000;
-      session.activeVetoUntil = vetoEndTime;
-
       curse = CURSE_TEMPLATES[Math.floor(Math.random() * CURSE_TEMPLATES.length)];
       session.activeCurseId = curse.id;
+
+      const vetoMinutes = session.settings.vetoDurationMinutes ?? DEFAULT_VETO_DURATION_MINUTES;
+      vetoEndTime = now + vetoMinutes * 60 * 1000;
+      session.activeVetoUntil = vetoEndTime;
     }
+
+    const report = {
+      mode,
+      durationMinutes: elapsedMinutes,
+      coinsDeducted,
+      newCoinsBalance: session.runnerCoins,
+      penaltiesApplied: isOverdraft,
+      curseApplied: curse,
+      vetoUntil: vetoEndTime,
+    };
 
     return {
       success: true,
@@ -403,6 +478,9 @@ export class GameManager {
       isOverdraft,
       curse,
       vetoEndTime,
+      mode,
+      durationMinutes: elapsedMinutes,
+      report,
     };
   }
 
@@ -411,7 +489,7 @@ export class GameManager {
    */
   public recordGpsPing(
     socketId: string,
-    data: { lat: number; lng: number; timestamp: number; speedKmH?: number }
+    data: { lat: number; lng: number; timestamp?: number; speedKmH?: number; speed?: number }
   ): {
     success: boolean;
     session?: GameSession;
@@ -436,10 +514,10 @@ export class GameManager {
     const now = data.timestamp || Date.now();
     player.lat = data.lat;
     player.lng = data.lng;
-    player.speedKmH = data.speedKmH || 0;
+    player.speedKmH = data.speedKmH || data.speed || 0;
     player.lastSeen = now;
 
-    // Full debrief history
+    // History tracking
     const historyPoint: PositionHistoryPoint = {
       playerId: player.id,
       role: player.role,
@@ -507,44 +585,43 @@ export class GameManager {
   }
 
   /**
-   * Hunter attempts capture
+   * Hunter attempts capture: computes distance to runner
    */
   public attemptCapture(hunterSocketId: string): {
     success: boolean;
     session?: GameSession;
     inRange: boolean;
-    hunterName: string;
     distance: number;
-    runnerSocketId?: string;
+    hunterName: string;
     error?: string;
   } {
     const session = this.getSessionBySocketId(hunterSocketId);
-    if (!session) return { success: false, inRange: false, hunterName: '', distance: 999999, error: 'Session introuvable.' };
+    if (!session) return { success: false, inRange: false, distance: 9999, hunterName: '', error: 'Session introuvable.' };
 
     const hunter = session.players.get(hunterSocketId);
     if (!hunter || hunter.role !== 'HUNTER') {
-      return { success: false, inRange: false, hunterName: '', distance: 999999, error: 'Seul un chasseur peut tenter la capture.' };
+      return { success: false, inRange: false, distance: 9999, hunterName: '', error: 'Seul un Chasseur peut lancer une capture.' };
     }
 
     if (!session.runnerId) {
-      return { success: false, inRange: false, hunterName: hunter.name, distance: 999999, error: 'Aucun Runner dans la session.' };
+      return { success: false, inRange: false, distance: 9999, hunterName: hunter.name, error: 'Aucun Runner dans la session.' };
     }
 
     const runner = session.players.get(session.runnerId);
-    if (!runner || runner.lat === 0 || runner.lng === 0) {
-      return { success: false, inRange: false, hunterName: hunter.name, distance: 999999, error: 'Coordonnées GPS du Runner indisponibles.' };
+    if (!runner) {
+      return { success: false, inRange: false, distance: 9999, hunterName: hunter.name, error: 'Runner introuvable.' };
     }
 
-    const distance = computeDistanceMeters(hunter.lat, hunter.lng, runner.lat, runner.lng);
-    const inRange = distance <= (session.settings.captureRadiusMeters || CAPTURE_RADIUS_METERS);
+    const distMeters = computeDistanceMeters(hunter.lat, hunter.lng, runner.lat, runner.lng);
+    const radiusMeters = session.settings.captureRadiusMeters || CAPTURE_RADIUS_METERS;
+    const inRange = distMeters <= radiusMeters;
 
     return {
       success: true,
       session,
       inRange,
+      distance: Math.round(distMeters * 10) / 10,
       hunterName: hunter.name,
-      distance,
-      runnerSocketId: runner.id,
     };
   }
 
@@ -602,7 +679,7 @@ export class GameManager {
     const session = this.getSessionBySocketId(socketId);
     if (!session) return { success: false };
 
-    session.runnerCoins += bonusCoins;
+    session.runnerCoins -= bonusCoins;
     const vetoEndTime = Date.now() + (session.settings.vetoDurationMinutes || 20) * 60 * 1000;
     session.activeVetoUntil = vetoEndTime;
 
@@ -626,29 +703,60 @@ export class GameManager {
       isReady: p.isReady,
       wantsToBeRunner: p.wantsToBeRunner,
       avatarUri: p.avatarUri || null,
+      isHost: p.id === session.hostId || p.playerId === session.hostId,
     }));
   }
 
   /**
-   * Handles player disconnection
+   * Serializes session to legacy game_state_update format
+   */
+  public getGameStateLegacy(session: GameSession): any {
+    const playersObj: Record<string, any> = {};
+    session.players.forEach((p, socketId) => {
+      playersObj[socketId] = {
+        id: socketId,
+        playerId: p.playerId || socketId,
+        role: p.role,
+        name: p.name,
+        isReady: p.isReady,
+        wantsToBeRunner: p.wantsToBeRunner,
+        avatarUri: p.avatarUri || null,
+        isHost: socketId === session.hostId || p.playerId === session.hostId,
+        joinedAt: p.lastSeen,
+      };
+    });
+
+    return {
+      gameId: session.gameCode,
+      coins: session.runnerCoins,
+      status: session.isSuspect ? 'SUSPECT' : 'NORMAL',
+      activeTransit: session.activeTransit,
+      activeVetoUntil: session.activeVetoUntil,
+      activeCurse: session.activeCurseId,
+      history: session.history,
+      lastHunterPing: session.history.filter((h) => h.role === 'RUNNER').pop() || null,
+      players: playersObj,
+      createdAt: session.createdAt,
+      updatedAt: Date.now(),
+    };
+  }
+
+  /**
+   * Handles player disconnection gracefully (persists player so reconnect doesn't drop room)
    */
   public removePlayer(socketId: string): { session?: GameSession; removedPlayer?: Player } {
     const gameCode = this.socketToGame.get(socketId);
     if (!gameCode) return {};
 
-    this.socketToGame.delete(socketId);
     const session = this.sessions.get(gameCode);
     if (!session) return {};
 
-    const removedPlayer = session.players.get(socketId);
-    if (removedPlayer) {
-      session.players.delete(socketId);
-      if (session.runnerId === socketId) {
-        session.runnerId = null;
-      }
+    const player = session.players.get(socketId);
+    if (player) {
+      player.lastSeen = Date.now();
+      // Keep player in session so mobile reconnection re-attaches seamlessly!
     }
-
-    return { session, removedPlayer };
+    return { session, removedPlayer: player };
   }
 
   /**

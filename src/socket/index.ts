@@ -2,7 +2,9 @@ import { Server, Socket } from 'socket.io';
 import { GameManager } from '../GameManager';
 import {
   ClientToServerEvents,
+  GameSession,
   InterServerEvents,
+  PlayerRole,
   ServerToClientEvents,
   SocketData,
 } from '../types';
@@ -22,11 +24,70 @@ export type AppSocket = Socket<
 >;
 
 /**
- * Standard Room names
+ * Standard Room helpers (supporting both legacy game:CODE and new game_CODE formats)
  */
 export const getGameRoom = (gameCode: string) => `game_${gameCode.toUpperCase()}`;
 export const getHunterRoom = (gameCode: string) => `hunters_${gameCode.toUpperCase()}`;
 export const getRunnerRoom = (gameCode: string) => `runners_${gameCode.toUpperCase()}`;
+
+/**
+ * Broadcasts an event to all room alias variants (game_CODE, game:CODE, CODE)
+ */
+export function emitToGame(io: AppSocketServer, gameCode: string, event: any, payload: any): void {
+  const code = gameCode.trim().toUpperCase();
+  io.to(`game_${code}`)
+    .to(`game:${code}`)
+    .to(code)
+    .emit(event, payload);
+}
+
+export function emitToHunters(io: AppSocketServer, gameCode: string, event: any, payload: any): void {
+  const code = gameCode.trim().toUpperCase();
+  io.to(`hunters_${code}`)
+    .to(`game:${code}:hunters`)
+    .emit(event, payload);
+}
+
+export function emitToRunners(io: AppSocketServer, gameCode: string, event: any, payload: any): void {
+  const code = gameCode.trim().toUpperCase();
+  io.to(`runners_${code}`)
+    .to(`game:${code}:runners`)
+    .emit(event, payload);
+}
+
+/**
+ * Joins a socket into all alias rooms for a game code and role
+ */
+export function joinAllGameRooms(socket: AppSocket, gameCode: string, role?: PlayerRole): void {
+  const code = gameCode.trim().toUpperCase();
+  socket.join(`game_${code}`);
+  socket.join(`game:${code}`);
+  socket.join(code);
+
+  if (role === 'RUNNER') {
+    socket.join(`runners_${code}`);
+    socket.join(`game:${code}:runners`);
+    socket.leave(`hunters_${code}`);
+    socket.leave(`game:${code}:hunters`);
+  } else if (role === 'HUNTER') {
+    socket.join(`hunters_${code}`);
+    socket.join(`game:${code}:hunters`);
+    socket.leave(`runners_${code}`);
+    socket.leave(`game:${code}:runners`);
+  }
+}
+
+/**
+ * Synchronizes both new 'lobby:updated' and authoritative legacy 'game_state_update'
+ */
+export function broadcastLobbyAndState(io: AppSocketServer, session: GameSession): void {
+  const gameManager = GameManager.getInstance();
+  const lobbyPlayers = gameManager.getLobbyPlayers(session);
+  const legacyState = gameManager.getGameStateLegacy(session);
+
+  emitToGame(io, session.gameCode, 'lobby:updated', { players: lobbyPlayers });
+  emitToGame(io, session.gameCode, 'game_state_update', legacyState);
+}
 
 export function setupSocketHandlers(io: AppSocketServer): void {
   const gameManager = GameManager.getInstance();
@@ -35,22 +96,18 @@ export function setupSocketHandlers(io: AppSocketServer): void {
     console.log(`[Socket.IO] Client connected: ${socket.id}`);
 
     // 1. CREATE_GAME
-    socket.on('create_game', (payload) => {
+    socket.on('create_game', (payload, callback) => {
       try {
         const { session, player } = gameManager.createGame(socket.id, payload);
-        const gameRoom = getGameRoom(session.gameCode);
 
         socket.data.gameCode = session.gameCode;
         socket.data.playerId = socket.id;
         socket.data.name = player.name;
         socket.data.role = player.role;
 
-        socket.join(gameRoom);
-        if (player.role === 'RUNNER') {
-          socket.join(getRunnerRoom(session.gameCode));
-        }
+        joinAllGameRooms(socket, session.gameCode, player.role);
 
-        console.log(`[Lobby] Game created: "${session.gameCode}" by "${player.name}"`);
+        console.log(`[Lobby] Game created: "${session.gameCode}" by host "${player.name}"`);
 
         // Emit to host
         socket.emit('game_created', {
@@ -58,53 +115,59 @@ export function setupSocketHandlers(io: AppSocketServer): void {
           initialCoins: session.runnerCoins,
         });
 
-        // Broadcast updated lobby
-        io.to(gameRoom).emit('lobby:updated', {
-          players: gameManager.getLobbyPlayers(session),
+        // Broadcast to all room variants
+        broadcastLobbyAndState(io, session);
+
+        callback?.({
+          success: true,
+          gameCode: session.gameCode,
+          state: gameManager.getGameStateLegacy(session),
         });
       } catch (err) {
         console.error('[Socket.IO] Error in create_game:', err);
+        callback?.({ success: false, error: String(err) });
       }
     });
 
     // 2. JOIN_GAME
-    socket.on('join_game', (payload) => {
+    socket.on('join_game', (payload, callback) => {
       try {
         const { session, player } = gameManager.joinGame(socket.id, payload);
-        const gameRoom = getGameRoom(session.gameCode);
 
         socket.data.gameCode = session.gameCode;
         socket.data.playerId = payload.playerId || socket.id;
         socket.data.name = player.name;
         socket.data.role = player.role;
 
-        socket.join(gameRoom);
+        joinAllGameRooms(socket, session.gameCode, player.role);
 
-        if (player.role === 'RUNNER') {
-          socket.join(getRunnerRoom(session.gameCode));
-        } else if (player.role === 'HUNTER') {
-          socket.join(getHunterRoom(session.gameCode));
-        }
+        console.log(`[Lobby] Player "${player.name}" (${player.role}) joined game "${session.gameCode}"`);
 
-        console.log(`[Lobby] Player "${player.name}" joined game "${session.gameCode}"`);
+        // Notify others
+        socket.to(getGameRoom(session.gameCode)).emit('player_joined', player);
 
-        io.to(gameRoom).emit('lobby:updated', {
-          players: gameManager.getLobbyPlayers(session),
+        // Broadcast authoritative room state
+        broadcastLobbyAndState(io, session);
+
+        callback?.({
+          success: true,
+          state: gameManager.getGameStateLegacy(session),
         });
       } catch (err) {
         console.error('[Socket.IO] Error in join_game:', err);
+        callback?.({ success: false, error: String(err) });
       }
     });
 
     // 3. PLAYER:TOGGLE_READY
     socket.on('player:toggle_ready', (payload) => {
       try {
-        const result = gameManager.toggleReady(payload.gameCode, socket.id);
+        const gameCode = payload?.gameCode || payload?.gameId || socket.data.gameCode;
+        if (!gameCode) return;
+
+        const result = gameManager.toggleReady(gameCode, socket.id);
         if (result.success && result.session) {
-          const gameRoom = getGameRoom(result.session.gameCode);
-          io.to(gameRoom).emit('lobby:updated', {
-            players: gameManager.getLobbyPlayers(result.session),
-          });
+          broadcastLobbyAndState(io, result.session);
         }
       } catch (err) {
         console.error('[Socket.IO] Error in player:toggle_ready:', err);
@@ -114,54 +177,60 @@ export function setupSocketHandlers(io: AppSocketServer): void {
     // 4. PLAYER:TOGGLE_WANTS_RUNNER
     socket.on('player:toggle_wants_runner', (payload) => {
       try {
-        const result = gameManager.toggleWantsRunner(payload.gameCode, socket.id);
+        const gameCode = payload?.gameCode || payload?.gameId || socket.data.gameCode;
+        if (!gameCode) return;
+
+        const result = gameManager.toggleWantsRunner(gameCode, socket.id);
         if (result.success && result.session) {
-          const gameRoom = getGameRoom(result.session.gameCode);
-          io.to(gameRoom).emit('lobby:updated', {
-            players: gameManager.getLobbyPlayers(result.session),
-          });
+          broadcastLobbyAndState(io, result.session);
         }
       } catch (err) {
         console.error('[Socket.IO] Error in player:toggle_wants_runner:', err);
       }
     });
 
-    // 5. START_GAME
-    socket.on('start_game', (payload) => {
+    // 5. START_GAME (supports start_game & game:start)
+    const handleStartGame = (payload: { gameCode?: string; gameId?: string; runnerId?: string; runnerName?: string }) => {
       try {
-        const result = gameManager.startGame(payload.gameCode);
+        const gameCode = payload?.gameCode || payload?.gameId || socket.data.gameCode;
+        if (!gameCode) {
+          console.warn('[Socket.IO] start_game missing gameCode.');
+          return;
+        }
+
+        const runnerTarget = payload?.runnerId || payload?.runnerName;
+        const result = gameManager.startGame(gameCode, runnerTarget);
+
         if (!result.success || !result.session || !result.runner) {
           console.warn(`[Socket.IO] Could not start game: ${result.error}`);
           return;
         }
 
         const session = result.session;
-        const gameRoom = getGameRoom(session.gameCode);
-        const hunterRoom = getHunterRoom(session.gameCode);
-        const runnerRoom = getRunnerRoom(session.gameCode);
 
-        // Update socket room memberships based on final assigned roles
+        // Reconfigure socket room memberships based on final assigned roles
         session.players.forEach((player) => {
           const clientSocket = io.sockets.sockets.get(player.id);
           if (clientSocket) {
             clientSocket.data.role = player.role;
-            if (player.role === 'RUNNER') {
-              clientSocket.join(runnerRoom);
-              clientSocket.leave(hunterRoom);
-            } else {
-              clientSocket.join(hunterRoom);
-              clientSocket.leave(runnerRoom);
-            }
+            joinAllGameRooms(clientSocket, session.gameCode, player.role);
           }
         });
 
-        console.log(`[Game] Game "${session.gameCode}" started! Runner: "${result.runner.name}"`);
+        console.log(`[Game] Game "${session.gameCode}" started! Designated Runner: "${result.runner.name}"`);
 
-        io.to(gameRoom).emit('game:started', {
+        const startedPayload = {
           runnerId: result.runner.id,
           stage: session.stage,
           jailTimeEndTime: result.jailTimeEndTime!,
-        });
+        };
+
+        // Emit both new and legacy started events
+        emitToGame(io, session.gameCode, 'game:started', startedPayload);
+        emitToGame(io, session.gameCode, 'game_started', startedPayload);
+
+        // Update overall game state
+        broadcastLobbyAndState(io, session);
 
         // Emit initial coins to the runner
         io.to(result.runner.id).emit('coins:updated', {
@@ -170,56 +239,78 @@ export function setupSocketHandlers(io: AppSocketServer): void {
       } catch (err) {
         console.error('[Socket.IO] Error in start_game:', err);
       }
-    });
+    };
+
+    socket.on('start_game', handleStartGame);
+    socket.on('game:start', handleStartGame);
 
     // 6. TRANSIT_START
-    socket.on('transit_start', (payload) => {
+    socket.on('transit_start', (payload, callback) => {
       try {
         const result = gameManager.startTransit(socket.id, payload.mode);
-        if (!result.success) {
+        if (!result.success || !result.session) {
           console.warn(`[Transit] Start rejected for socket ${socket.id}: ${result.error}`);
+          callback?.({ success: false, error: result.error });
           return;
         }
-        console.log(`[Transit] Started mode "${payload.mode}" for runner ${socket.id}`);
+
+        emitToGame(io, result.session.gameCode, 'transit_started', result.session.activeTransit);
+        emitToGame(io, result.session.gameCode, 'game_state_update', gameManager.getGameStateLegacy(result.session));
+
+        console.log(`[Transit] Runner started "${payload.mode}" in game "${result.session.gameCode}"`);
+        callback?.({ success: true, state: gameManager.getGameStateLegacy(result.session) });
       } catch (err) {
         console.error('[Socket.IO] Error in transit_start:', err);
+        callback?.({ success: false, error: String(err) });
       }
     });
 
     // 7. TRANSIT_STOP
-    socket.on('transit_stop', () => {
+    socket.on('transit_stop', (payload, callback) => {
       try {
         const result = gameManager.stopTransit(socket.id);
         if (!result.success || !result.session) {
           console.warn(`[Transit] Stop rejected for socket ${socket.id}: ${result.error}`);
+          callback?.({ success: false, error: result.error });
           return;
         }
 
         const session = result.session;
-        const gameRoom = getGameRoom(session.gameCode);
 
-        // Broadcast updated coin balance
-        io.to(gameRoom).emit('coins:updated', {
+        // Broadcast updated coin balance & transit stopped report
+        emitToGame(io, session.gameCode, 'coins:updated', {
           coins: result.newCoinsBalance!,
         });
+
+        if (result.report) {
+          emitToGame(io, session.gameCode, 'transit_stopped', result.report);
+        }
+
+        emitToGame(io, session.gameCode, 'game_state_update', gameManager.getGameStateLegacy(session));
 
         // Overdraft / bankruptcy handling
         if (result.isOverdraft) {
           console.warn(`[Transit] Overdraft in game "${session.gameCode}"! Coins: ${result.newCoinsBalance}`);
 
-          io.to(gameRoom).emit('game:suspect_alert', {
+          const alertPayload = {
             isSuspect: true,
-            reason: 'Solde de coins négatif après un trajet en transport.',
-          });
+            reason: `Solde de coins négatif (${result.newCoinsBalance}) après un trajet en ${result.report?.mode || 'transport'}.`,
+            coins: result.newCoinsBalance,
+            vetoUntil: result.vetoEndTime,
+            curse: result.curse,
+          };
+
+          emitToGame(io, session.gameCode, 'game:suspect_alert', alertPayload);
+          emitToGame(io, session.gameCode, 'suspect_alert', alertPayload);
 
           if (result.vetoEndTime) {
-            io.to(gameRoom).emit('veto:started', {
+            emitToGame(io, session.gameCode, 'veto:started', {
               vetoEndTime: result.vetoEndTime,
             });
           }
 
           if (result.curse) {
-            io.to(gameRoom).emit('runner:curse_triggered', {
+            emitToGame(io, session.gameCode, 'runner:curse_triggered', {
               id: result.curse.id,
               title: result.curse.title,
               description: result.curse.description,
@@ -227,34 +318,47 @@ export function setupSocketHandlers(io: AppSocketServer): void {
             });
           }
         }
+
+        callback?.({
+          success: true,
+          report: result.report,
+          state: gameManager.getGameStateLegacy(session),
+        });
       } catch (err) {
         console.error('[Socket.IO] Error in transit_stop:', err);
+        callback?.({ success: false, error: String(err) });
       }
     });
 
     // 8. PING_GPS
-    socket.on('ping_gps', (payload) => {
+    socket.on('ping_gps', (payload, callback) => {
       try {
         if (typeof payload.lat !== 'number' || typeof payload.lng !== 'number') {
+          callback?.({ success: false, error: 'Coordonnées GPS invalides.' });
           return;
         }
 
         const result = gameManager.recordGpsPing(socket.id, payload);
-        if (!result.success || !result.session) return;
+        if (!result.success || !result.session) {
+          callback?.({ success: false, error: result.error });
+          return;
+        }
 
-        const hunterRoom = getHunterRoom(result.session.gameCode);
-
-        // If Hunter moved: broadcast updated hunters locations
+        // If Hunter moved: broadcast updated hunters locations to hunters room
         if (!result.isRunner && result.huntersList) {
-          io.to(hunterRoom).emit('hunters:updated', result.huntersList);
+          emitToHunters(io, result.session.gameCode, 'hunters:updated', result.huntersList);
         }
 
         // If Runner moved and broadcast conditions met: broadcast to hunters
         if (result.isRunner && result.broadcastRunnerPing && result.runnerPingPayload) {
-          io.to(hunterRoom).emit('runner:last_ping', result.runnerPingPayload);
+          emitToHunters(io, result.session.gameCode, 'runner:last_ping', result.runnerPingPayload);
+          emitToHunters(io, result.session.gameCode, 'hunter_ping', result.runnerPingPayload);
         }
+
+        callback?.({ success: true, broadcasted: result.broadcastRunnerPing });
       } catch (err) {
         console.error('[Socket.IO] Error in ping_gps:', err);
+        callback?.({ success: false, error: String(err) });
       }
     });
 
@@ -264,10 +368,8 @@ export function setupSocketHandlers(io: AppSocketServer): void {
         const result = gameManager.attemptCapture(socket.id);
         if (!result.success || !result.session) return;
 
-        const gameRoom = getGameRoom(result.session.gameCode);
-
-        // Threat event sent to runner (or game room)
-        io.to(gameRoom).emit('capture:threat', {
+        // Threat event sent to entire game room
+        emitToGame(io, result.session.gameCode, 'capture:threat', {
           inRange: result.inRange,
           hunterName: result.hunterName,
           distance: result.distance,
@@ -285,13 +387,14 @@ export function setupSocketHandlers(io: AppSocketServer): void {
         const result = gameManager.confirmCaptured(socket.id);
         if (!result.success || !result.session) return;
 
-        const gameRoom = getGameRoom(result.session.gameCode);
         console.log(`[Game] Runner confirmed capture! Game "${result.session.gameCode}" ended.`);
 
-        io.to(gameRoom).emit('game:ended', {
+        emitToGame(io, result.session.gameCode, 'game:ended', {
           winner: result.winner || 'HUNTERS',
           history: result.history || [],
         });
+
+        broadcastLobbyAndState(io, result.session);
       } catch (err) {
         console.error('[Socket.IO] Error in runner:confirm_captured:', err);
       }
@@ -302,10 +405,10 @@ export function setupSocketHandlers(io: AppSocketServer): void {
       try {
         const result = gameManager.acceptCurse(socket.id, payload.coinReward);
         if (result.success && result.session) {
-          const gameRoom = getGameRoom(result.session.gameCode);
-          io.to(gameRoom).emit('coins:updated', {
+          emitToGame(io, result.session.gameCode, 'coins:updated', {
             coins: result.newCoins!,
           });
+          broadcastLobbyAndState(io, result.session);
         }
       } catch (err) {
         console.error('[Socket.IO] Error in curse:accept:', err);
@@ -317,30 +420,55 @@ export function setupSocketHandlers(io: AppSocketServer): void {
       try {
         const result = gameManager.vetoCurse(socket.id, payload.bonusCoins);
         if (result.success && result.session) {
-          const gameRoom = getGameRoom(result.session.gameCode);
           if (result.vetoEndTime) {
-            io.to(gameRoom).emit('veto:started', {
+            emitToGame(io, result.session.gameCode, 'veto:started', {
               vetoEndTime: result.vetoEndTime,
             });
           }
-          io.to(gameRoom).emit('coins:updated', {
+          emitToGame(io, result.session.gameCode, 'coins:updated', {
             coins: result.newCoins!,
           });
+          broadcastLobbyAndState(io, result.session);
         }
       } catch (err) {
         console.error('[Socket.IO] Error in curse:veto:', err);
       }
     });
 
-    // DISCONNECT
+    // 13. EXPORT_GPX
+    socket.on('export_gpx', (payload, callback) => {
+      try {
+        const gameCode = payload?.gameCode || payload?.gameId || socket.data.gameCode;
+        if (!gameCode) {
+          callback?.({ success: false, error: 'gameCode manquant' });
+          return;
+        }
+
+        const result = gameManager.exportGpx(gameCode);
+        if (!result.success || !result.gpx) {
+          callback?.({ success: false, error: result.error || 'Erreur GPX' });
+          return;
+        }
+
+        socket.emit('gpx_exported', {
+          gpx: result.gpx,
+          filename: result.filename || `game_${gameCode}.gpx`,
+        });
+
+        callback?.({ success: true, gpx: result.gpx });
+      } catch (err) {
+        console.error('[Socket.IO] Error in export_gpx:', err);
+        callback?.({ success: false, error: String(err) });
+      }
+    });
+
+    // 14. DISCONNECT
     socket.on('disconnect', (reason) => {
       console.log(`[Socket.IO] Client disconnected: ${socket.id} (reason: ${reason})`);
-      const { session, removedPlayer } = gameManager.removePlayer(socket.id);
-      if (session && removedPlayer) {
-        const gameRoom = getGameRoom(session.gameCode);
-        io.to(gameRoom).emit('lobby:updated', {
-          players: gameManager.getLobbyPlayers(session),
-        });
+      const { session } = gameManager.removePlayer(socket.id);
+      if (session) {
+        // Player is preserved with lastSeen timestamp so reconnect works!
+        broadcastLobbyAndState(io, session);
       }
     });
   });
