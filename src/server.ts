@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import { Server } from 'socket.io';
 import { apiRouter } from './routes/api';
 import { setupSocketHandlers } from './socket';
+import { GameManager } from './GameManager';
 import {
   ClientToServerEvents,
   InterServerEvents,
@@ -62,6 +63,18 @@ server.listen(PORT, HOST, () => {
   console.log(`📡 Socket.IO initialized with permissive CORS`);
   console.log(`🩺 Healthcheck: http://${HOST}:${PORT}/health`);
   console.log('====================================================');
+
+  // Anti-sleep keepalive: when active games are running, ping self to keep cloud container awake
+  setInterval(() => {
+    try {
+      const activeCount = GameManager.getInstance().listSessions().length;
+      if (activeCount > 0) {
+        http.get(`http://127.0.0.1:${PORT}/health`, () => {}).on('error', () => {});
+      }
+    } catch {
+      // Ignore background keepalive error
+    }
+  }, 5 * 60 * 1000); // Every 5 minutes
 });
 
 // Graceful shutdown

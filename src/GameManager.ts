@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import {
   CAPTURE_RADIUS_METERS,
   CURSE_TEMPLATES,
@@ -18,19 +20,75 @@ import {
 import { computeDistanceMeters } from './utils/geo';
 import { generateGpx } from './utils/gpxGenerator';
 
+const SESSIONS_FILE = path.resolve(process.cwd(), 'data_sessions.json');
+
 export class GameManager {
   private static instance: GameManager;
   private sessions: Map<string, GameSession> = new Map();
   // Reverse lookup: socketId -> gameCode
   private socketToGame: Map<string, string> = new Map();
 
-  private constructor() {}
+  private constructor() {
+    this.loadFromDisk();
+  }
 
   public static getInstance(): GameManager {
     if (!GameManager.instance) {
       GameManager.instance = new GameManager();
     }
     return GameManager.instance;
+  }
+
+  private saveToDisk(): void {
+    try {
+      const data: Record<string, any> = {};
+      this.sessions.forEach((session, code) => {
+        if (session.stage !== 'ENDED') {
+          const playersObj: Record<string, any> = {};
+          session.players.forEach((p, id) => {
+            playersObj[id] = p;
+          });
+          data[code] = {
+            ...session,
+            players: playersObj,
+          };
+        }
+      });
+      fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (e) {
+      console.error('[GameManager] Failed to persist sessions to disk:', e);
+    }
+  }
+
+  public loadFromDisk(): void {
+    try {
+      if (!fs.existsSync(SESSIONS_FILE)) return;
+      const raw = fs.readFileSync(SESSIONS_FILE, 'utf-8');
+      const data = JSON.parse(raw);
+      let count = 0;
+      Object.keys(data).forEach((code) => {
+        const rawSession = data[code];
+        const playersMap = new Map<string, Player>();
+        if (rawSession.players) {
+          Object.keys(rawSession.players).forEach((pId) => {
+            const player = rawSession.players[pId];
+            playersMap.set(pId, player);
+            this.socketToGame.set(pId, code);
+          });
+        }
+        const session: GameSession = {
+          ...rawSession,
+          players: playersMap,
+        };
+        this.sessions.set(code, session);
+        count++;
+      });
+      if (count > 0) {
+        console.log(`[GameManager] Restored ${count} active session(s) from disk persistence.`);
+      }
+    } catch (e) {
+      console.error('[GameManager] Failed to load sessions from disk:', e);
+    }
   }
 
   /**
@@ -113,6 +171,7 @@ export class GameManager {
 
     this.sessions.set(gameCode, session);
     this.socketToGame.set(hostSocketId, gameCode);
+    this.saveToDisk();
 
     return { session, player: hostPlayer };
   }
@@ -224,6 +283,7 @@ export class GameManager {
       }
 
       console.log(`[Reconnection] Player "${existingPlayer.name}" reconnected with new socket ${socketId}`);
+      this.saveToDisk();
       return { session, player: existingPlayer };
     }
 
@@ -259,6 +319,7 @@ export class GameManager {
       session.runnerId = socketId;
     }
 
+    this.saveToDisk();
     return { session, player };
   }
 
@@ -273,6 +334,7 @@ export class GameManager {
     if (!player) return { success: false };
 
     player.isReady = !player.isReady;
+    this.saveToDisk();
     return { success: true, session };
   }
 
@@ -287,6 +349,7 @@ export class GameManager {
     if (!player) return { success: false };
 
     player.wantsToBeRunner = !player.wantsToBeRunner;
+    this.saveToDisk();
     return { success: true, session };
   }
 
@@ -354,6 +417,8 @@ export class GameManager {
     session.isEnded = false;
     session.winner = null;
 
+    this.saveToDisk();
+
     return {
       success: true,
       session,
@@ -395,6 +460,7 @@ export class GameManager {
       mode,
       startTime: now,
     };
+    this.saveToDisk();
 
     return { success: true, session };
   }
@@ -469,6 +535,8 @@ export class GameManager {
       curseApplied: curse,
       vetoUntil: vetoEndTime,
     };
+
+    this.saveToDisk();
 
     return {
       success: true,
@@ -646,6 +714,7 @@ export class GameManager {
     session.isEnded = true;
     session.stage = 'ENDED';
     session.winner = 'HUNTERS';
+    this.saveToDisk();
 
     return {
       success: true,
@@ -666,6 +735,7 @@ export class GameManager {
     if (!session) return { success: false };
 
     session.runnerCoins += coinReward;
+    this.saveToDisk();
     return { success: true, session, newCoins: session.runnerCoins };
   }
 
@@ -682,6 +752,7 @@ export class GameManager {
     session.runnerCoins -= bonusCoins;
     const vetoEndTime = Date.now() + (session.settings.vetoDurationMinutes || 20) * 60 * 1000;
     session.activeVetoUntil = vetoEndTime;
+    this.saveToDisk();
 
     return {
       success: true,
