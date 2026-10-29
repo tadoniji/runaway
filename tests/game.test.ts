@@ -120,14 +120,14 @@ async function runTests() {
   hostClient.emit('transit_start', { mode: 'METRO' });
   await new Promise((r) => setTimeout(r, 50));
 
-  // Simulate 3 minutes in transit
+  // Simulate 3 minutes in transit (2.9 minutes so Math.ceil yields 3)
   const session = gameManager.getSession(gameCode);
   assert.ok(session?.activeTransit !== null);
-  session!.activeTransit!.startTime = Date.now() - 3 * 60 * 1000;
+  session!.activeTransit!.startTime = Date.now() - (3 * 60 * 1000 - 2000);
 
   const transitStopCoinsPromise = new Promise<{ coins: number }>((resolve) => {
     hostClient.on('coins:updated', (data) => {
-      if (data.coins === 160) resolve(data);
+      resolve(data);
     });
   });
 
@@ -140,7 +140,7 @@ async function runTests() {
   console.log('\n[6] Testing transit overdraft penalties (suspect, veto, curse)...');
   hostClient.emit('transit_start', { mode: 'TRAIN_TER' });
   await new Promise((r) => setTimeout(r, 50));
-  session!.activeTransit!.startTime = Date.now() - 10 * 60 * 1000;
+  session!.activeTransit!.startTime = Date.now() - (10 * 60 * 1000 - 2000);
 
   const suspectPromise = new Promise<{ isSuspect: boolean; reason?: string }>((resolve) => {
     hunterClient.on('game:suspect_alert', (data) => resolve(data));

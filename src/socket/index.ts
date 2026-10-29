@@ -96,12 +96,13 @@ export function setupSocketHandlers(io: AppSocketServer): void {
     console.log(`[Socket.IO] Client connected: ${socket.id}`);
 
     // 1. CREATE_GAME
-    socket.on('create_game', (payload, callback) => {
+    socket.on('create_game', (rawPayload: any, callback: any) => {
       try {
+        const payload = Array.isArray(rawPayload) ? (rawPayload[0] || {}) : (rawPayload || {});
         const { session, player } = gameManager.createGame(socket.id, payload);
 
         socket.data.gameCode = session.gameCode;
-        socket.data.playerId = socket.id;
+        socket.data.playerId = player.playerId || socket.id;
         socket.data.name = player.name;
         socket.data.role = player.role;
 
@@ -130,12 +131,13 @@ export function setupSocketHandlers(io: AppSocketServer): void {
     });
 
     // 2. JOIN_GAME
-    socket.on('join_game', (payload, callback) => {
+    socket.on('join_game', (rawPayload: any, callback: any) => {
       try {
+        const payload = Array.isArray(rawPayload) ? (rawPayload[0] || {}) : (rawPayload || {});
         const { session, player } = gameManager.joinGame(socket.id, payload);
 
         socket.data.gameCode = session.gameCode;
-        socket.data.playerId = payload.playerId || socket.id;
+        socket.data.playerId = player.playerId || payload.playerId || socket.id;
         socket.data.name = player.name;
         socket.data.role = player.role;
 
@@ -190,8 +192,9 @@ export function setupSocketHandlers(io: AppSocketServer): void {
     });
 
     // 5. START_GAME (supports start_game & game:start)
-    const handleStartGame = (payload: { gameCode?: string; gameId?: string; runnerId?: string; runnerName?: string }) => {
+    const handleStartGame = (rawPayload: any) => {
       try {
+        const payload = Array.isArray(rawPayload) ? (rawPayload[0] || {}) : (rawPayload || {});
         const gameCode = payload?.gameCode || payload?.gameId || socket.data.gameCode;
         if (!gameCode) {
           console.warn('[Socket.IO] start_game missing gameCode.');
@@ -221,6 +224,8 @@ export function setupSocketHandlers(io: AppSocketServer): void {
 
         const startedPayload = {
           runnerId: result.runner.id,
+          runnerPlayerId: result.runner.playerId,
+          runnerName: result.runner.name,
           stage: session.stage,
           jailTimeEndTime: result.jailTimeEndTime!,
         };

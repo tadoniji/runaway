@@ -111,25 +111,50 @@ export class GameManager {
    */
   public createGame(
     hostSocketId: string,
-    payload: {
-      gameId?: string;
-      gameCode?: string;
-      name: string;
-      wantsToBeRunner?: boolean;
-      initialCoins?: number;
-      jailTimeMinutes?: number;
-    }
+    rawPayload: any
   ): { session: GameSession; player: Player } {
+    const payload = Array.isArray(rawPayload) ? (rawPayload[0] || {}) : (rawPayload || {});
     const requestedCode = (payload.gameId || payload.gameCode || '').trim().toUpperCase();
-    const gameCode = requestedCode.length === 6 ? requestedCode : this.generateGameCode();
     const now = Date.now();
     const initialCoins = payload.initialCoins ?? DEFAULT_INITIAL_COINS;
     const jailTimeMinutes = payload.jailTimeMinutes ?? DEFAULT_JAIL_TIME_MINUTES;
+    const hostPlayerId = payload.playerId || hostSocketId;
+    const hostName = (payload.name || '').trim() || 'Hôte';
+
+    // If session already exists with requestedCode, re-bind host socket and do NOT wipe room
+    if (requestedCode && this.sessions.has(requestedCode)) {
+      const existingSession = this.sessions.get(requestedCode)!;
+      let hostPlayer = existingSession.players.get(hostSocketId);
+      if (!hostPlayer) {
+        const hostEntry = Array.from(existingSession.players.entries()).find(([oldId, p]) => {
+          return (payload.playerId && p.playerId === payload.playerId) || p.name.toLowerCase() === hostName.toLowerCase();
+        });
+        if (hostEntry) {
+          const [oldId, p] = hostEntry;
+          existingSession.players.delete(oldId);
+          this.socketToGame.delete(oldId);
+          hostPlayer = p;
+        }
+      }
+
+      if (hostPlayer) {
+        hostPlayer.id = hostSocketId;
+        hostPlayer.playerId = hostPlayerId;
+        hostPlayer.lastSeen = now;
+        existingSession.hostId = hostSocketId;
+        existingSession.players.set(hostSocketId, hostPlayer);
+        this.socketToGame.set(hostSocketId, existingSession.gameCode);
+        this.saveToDisk();
+        return { session: existingSession, player: hostPlayer };
+      }
+    }
+
+    const gameCode = requestedCode.length === 6 ? requestedCode : this.generateGameCode();
 
     const hostPlayer: Player = {
       id: hostSocketId,
-      playerId: hostSocketId,
-      name: payload.name.trim() || 'Host',
+      playerId: hostPlayerId,
+      name: hostName,
       role: payload.wantsToBeRunner ? 'RUNNER' : 'UNDECIDED',
       wantsToBeRunner: payload.wantsToBeRunner ?? false,
       isReady: true,
@@ -234,28 +259,27 @@ export class GameManager {
    */
   public joinGame(
     socketId: string,
-    payload: {
-      gameId?: string;
-      gameCode?: string;
-      playerId?: string;
-      role?: string;
-      name: string;
-      wantsToBeRunner?: boolean;
-      avatarUri?: string;
-    }
+    rawPayload: any
   ): { session: GameSession; player: Player } {
+    const payload = Array.isArray(rawPayload) ? (rawPayload[0] || {}) : (rawPayload || {});
     const rawCode = payload.gameId || payload.gameCode || 'DEFAULT';
     const gameCode = rawCode.trim().toUpperCase();
     const session = this.getOrCreateSession(gameCode, socketId);
     const now = Date.now();
 
-    const normalizedName = payload.name.trim();
+    const candidatePlayerId = payload.playerId || socketId;
+    let normalizedName = (payload.name || '').trim();
+    if (!normalizedName) {
+      normalizedName = `Joueur_${socketId.slice(0, 4)}`;
+    }
 
-    // Check if player already exists in this session by name or playerId (Reconnection handling)
+    // Reconnection handling:
+    // Only match as reconnecting player if candidatePlayerId matches an existing player's playerId
+    // OR if old socket ID matches socketId
     const existingEntry = Array.from(session.players.entries()).find(([oldSockId, p]) => {
       const matchPlayerId = payload.playerId && p.playerId === payload.playerId;
-      const matchName = normalizedName && p.name.toLowerCase() === normalizedName.toLowerCase();
-      return matchPlayerId || matchName;
+      const matchSameSocket = oldSockId === socketId;
+      return matchPlayerId || matchSameSocket;
     });
 
     if (existingEntry) {
@@ -268,7 +292,11 @@ export class GameManager {
       }
 
       existingPlayer.id = socketId;
+      existingPlayer.playerId = candidatePlayerId;
       existingPlayer.lastSeen = now;
+      if (normalizedName && normalizedName !== 'Joueur' && normalizedName !== 'Invité') {
+        existingPlayer.name = normalizedName;
+      }
       if (payload.avatarUri) existingPlayer.avatarUri = payload.avatarUri;
       if (payload.wantsToBeRunner !== undefined) existingPlayer.wantsToBeRunner = payload.wantsToBeRunner;
 
@@ -282,9 +310,18 @@ export class GameManager {
         session.hostId = socketId;
       }
 
-      console.log(`[Reconnection] Player "${existingPlayer.name}" reconnected with new socket ${socketId}`);
+      console.log(`[Reconnection] Player "${existingPlayer.name}" (${existingPlayer.playerId}) reconnected with new socket ${socketId}`);
       this.saveToDisk();
       return { session, player: existingPlayer };
+    }
+
+    // Disambiguate duplicate names for new players
+    let finalName = normalizedName;
+    const sameNameCount = Array.from(session.players.values()).filter(
+      p => p.name.toLowerCase() === normalizedName.toLowerCase()
+    ).length;
+    if (sameNameCount > 0) {
+      finalName = `${normalizedName} (${sameNameCount + 1})`;
     }
 
     // Brand new player joining
@@ -300,8 +337,8 @@ export class GameManager {
 
     const player: Player = {
       id: socketId,
-      playerId: payload.playerId || socketId,
-      name: normalizedName || `Player_${socketId.slice(0, 4)}`,
+      playerId: candidatePlayerId,
+      name: finalName,
       role,
       wantsToBeRunner: payload.wantsToBeRunner ?? (role === 'RUNNER'),
       isReady: false,
@@ -379,18 +416,13 @@ export class GameManager {
     }
 
     if (!chosenRunner) {
-      // Weighted selection: Volunteers have 10x chance
-      const hasVolunteers = playersList.some((p) => p.wantsToBeRunner);
-      const weightedPool: Player[] = [];
-
-      playersList.forEach((p) => {
-        const weight = hasVolunteers ? (p.wantsToBeRunner ? 10 : 1) : 1;
-        for (let i = 0; i < weight; i++) {
-          weightedPool.push(p);
-        }
-      });
-
-      chosenRunner = weightedPool[Math.floor(Math.random() * weightedPool.length)];
+      // Official rule: Volunteers are chosen. If multiple volunteers, random among them. If none, random among all.
+      const volunteers = playersList.filter((p) => p.wantsToBeRunner);
+      if (volunteers.length > 0) {
+        chosenRunner = volunteers[Math.floor(Math.random() * volunteers.length)];
+      } else {
+        chosenRunner = playersList[Math.floor(Math.random() * playersList.length)];
+      }
     }
 
     session.runnerId = chosenRunner.id;

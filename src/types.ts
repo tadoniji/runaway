@@ -166,12 +166,16 @@ export interface ServerToClientEvents {
 
   'game:started': (payload: {
     runnerId: string;
+    runnerPlayerId?: string;
+    runnerName?: string;
     stage: string;
     jailTimeEndTime: number;
   }) => void;
 
   game_started: (payload: {
     runnerId: string;
+    runnerPlayerId?: string;
+    runnerName?: string;
     stage: string;
     jailTimeEndTime: number;
   }) => void;
