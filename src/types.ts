@@ -153,6 +153,10 @@ export interface ClientToServerEvents {
 
   'runner:confirm_captured': () => void;
 
+  'game:final_run': (payload: { gameCode?: string; gameId?: string; powerType: string }) => void;
+
+  'game:abandon': (payload: { gameCode?: string; gameId?: string }) => void;
+
   export_gpx: (
     payload: { gameId?: string; gameCode?: string },
     callback?: (response: any) => void
@@ -163,6 +167,9 @@ export interface ServerToClientEvents {
   game_created: (payload: { gameCode: string; initialCoins: number }) => void;
 
   'lobby:updated': (payload: { players: any[] }) => void;
+
+  'game:final_run_activated': (payload: { powerType: string; endsAt: number; durationMinutes: number }) => void;
+  'final_run:activated': (payload: { powerType: string; endsAt: number; durationMinutes: number }) => void;
 
   'game:started': (payload: {
     runnerId: string;

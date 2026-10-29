@@ -169,7 +169,30 @@ export function setupSocketHandlers(io: AppSocketServer): void {
 
         const result = gameManager.toggleReady(gameCode, socket.id);
         if (result.success && result.session) {
-          broadcastLobbyAndState(io, result.session);
+          if (result.autoStarted?.success && result.autoStarted.session && result.autoStarted.runner) {
+            const session = result.autoStarted.session;
+            const runner = result.autoStarted.runner;
+            session.players.forEach((player) => {
+              const clientSocket = io.sockets.sockets.get(player.id);
+              if (clientSocket) {
+                clientSocket.data.role = player.role;
+                joinAllGameRooms(clientSocket, session.gameCode, player.role);
+              }
+            });
+            const startedPayload = {
+              runnerId: runner.id,
+              runnerPlayerId: runner.playerId,
+              runnerName: runner.name,
+              stage: session.stage,
+              jailTimeEndTime: result.autoStarted.jailTimeEndTime!,
+            };
+            emitToGame(io, session.gameCode, 'game:started', startedPayload);
+            emitToGame(io, session.gameCode, 'game_started', startedPayload);
+            broadcastLobbyAndState(io, session);
+            io.to(runner.id).emit('coins:updated', { coins: session.runnerCoins });
+          } else {
+            broadcastLobbyAndState(io, result.session);
+          }
         }
       } catch (err) {
         console.error('[Socket.IO] Error in player:toggle_ready:', err);
@@ -467,7 +490,49 @@ export function setupSocketHandlers(io: AppSocketServer): void {
       }
     });
 
-    // 14. DISCONNECT
+    // 14. FINAL RUN ACTIVATION (Hunters at 1h30)
+    socket.on('game:final_run', (rawPayload: any) => {
+      try {
+        const payload = Array.isArray(rawPayload) ? (rawPayload[0] || {}) : (rawPayload || {});
+        const gameCode = payload?.gameCode || payload?.gameId || socket.data.gameCode;
+        const powerType = payload?.powerType || 'MEGA_RADAR';
+        if (!gameCode) return;
+
+        const durationMinutes = 10;
+        const endsAt = Date.now() + durationMinutes * 60 * 1000;
+
+        console.log(`[FinalRun] Activated "${powerType}" in game "${gameCode}" for 10 min!`);
+
+        emitToGame(io, gameCode, 'game:final_run_activated', {
+          powerType,
+          endsAt,
+          durationMinutes,
+        });
+        emitToGame(io, gameCode, 'final_run:activated', {
+          powerType,
+          endsAt,
+          durationMinutes,
+        });
+      } catch (err) {
+        console.error('[Socket.IO] Error in game:final_run:', err);
+      }
+    });
+
+    // 15. ABANDON GAME
+    socket.on('game:abandon', (rawPayload: any) => {
+      try {
+        const payload = Array.isArray(rawPayload) ? (rawPayload[0] || {}) : (rawPayload || {});
+        const gameCode = payload?.gameCode || payload?.gameId || socket.data.gameCode;
+        if (!gameCode) return;
+
+        console.log(`[Game] Game "${gameCode}" abandoned by client ${socket.id}`);
+        emitToGame(io, gameCode, 'game:ended', { winner: 'ABANDONED' });
+      } catch (err) {
+        console.error('[Socket.IO] Error in game:abandon:', err);
+      }
+    });
+
+    // 16. DISCONNECT
     socket.on('disconnect', (reason) => {
       console.log(`[Socket.IO] Client disconnected: ${socket.id} (reason: ${reason})`);
       const { session } = gameManager.removePlayer(socket.id);

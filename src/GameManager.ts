@@ -361,9 +361,13 @@ export class GameManager {
   }
 
   /**
-   * Toggles ready state for a player
+   * Toggles ready state for a player. Auto-starts game if all players (>=2) are ready!
    */
-  public toggleReady(gameCode: string, socketId: string): { success: boolean; session?: GameSession } {
+  public toggleReady(gameCode: string, socketId: string): {
+    success: boolean;
+    session?: GameSession;
+    autoStarted?: ReturnType<GameManager['startGame']>;
+  } {
     const session = this.getSession(gameCode);
     if (!session) return { success: false };
 
@@ -372,7 +376,16 @@ export class GameManager {
 
     player.isReady = !player.isReady;
     this.saveToDisk();
-    return { success: true, session };
+
+    // Auto-launch if all players are ready (at least 2 players in lobby)
+    let autoStarted: ReturnType<GameManager['startGame']> | undefined;
+    const allReady = session.stage === 'LOBBY' && session.players.size >= 2 && Array.from(session.players.values()).every(p => p.isReady);
+    if (allReady) {
+      console.log(`[Lobby] All ${session.players.size} players ready in "${gameCode}"! Auto-starting game...`);
+      autoStarted = this.startGame(gameCode);
+    }
+
+    return { success: true, session, autoStarted };
   }
 
   /**
