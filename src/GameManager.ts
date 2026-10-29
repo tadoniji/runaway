@@ -844,6 +844,12 @@ export class GameManager {
 
     return {
       gameId: session.gameCode,
+      gameCode: session.gameCode,
+      stage: session.stage,
+      isGameStarted: session.stage === 'ACTIVE',
+      runnerId: session.runnerId,
+      activeRunnerPlayerId: session.runnerId,
+      jailTimeEndTime: session.jailTimeEndTime,
       coins: session.runnerCoins,
       status: session.isSuspect ? 'SUSPECT' : 'NORMAL',
       activeTransit: session.activeTransit,

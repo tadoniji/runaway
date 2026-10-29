@@ -151,6 +151,25 @@ export function setupSocketHandlers(io: AppSocketServer): void {
         // Broadcast authoritative room state
         broadcastLobbyAndState(io, session);
 
+        // If match is already in active run, notify joining socket immediately
+        if (session.stage === 'ACTIVE' && session.runnerId) {
+          const runnerPlayer = session.players.get(session.runnerId);
+          socket.emit('game:started', {
+            runnerId: session.runnerId,
+            runnerPlayerId: runnerPlayer?.playerId,
+            runnerName: runnerPlayer?.name || 'Runner',
+            stage: session.stage,
+            jailTimeEndTime: session.jailTimeEndTime || (Date.now() + 600000),
+          });
+          socket.emit('game_started', {
+            runnerId: session.runnerId,
+            runnerPlayerId: runnerPlayer?.playerId,
+            runnerName: runnerPlayer?.name || 'Runner',
+            stage: session.stage,
+            jailTimeEndTime: session.jailTimeEndTime || (Date.now() + 600000),
+          });
+        }
+
         callback?.({
           success: true,
           state: gameManager.getGameStateLegacy(session),
@@ -188,6 +207,11 @@ export function setupSocketHandlers(io: AppSocketServer): void {
             };
             emitToGame(io, session.gameCode, 'game:started', startedPayload);
             emitToGame(io, session.gameCode, 'game_started', startedPayload);
+            // Ensure direct delivery to each player socket in session
+            session.players.forEach((player) => {
+              io.to(player.id).emit('game:started', startedPayload);
+              io.to(player.id).emit('game_started', startedPayload);
+            });
             broadcastLobbyAndState(io, session);
             io.to(runner.id).emit('coins:updated', { coins: session.runnerCoins });
           } else {
@@ -256,6 +280,12 @@ export function setupSocketHandlers(io: AppSocketServer): void {
         // Emit both new and legacy started events
         emitToGame(io, session.gameCode, 'game:started', startedPayload);
         emitToGame(io, session.gameCode, 'game_started', startedPayload);
+
+        // Ensure direct delivery to each player socket in session
+        session.players.forEach((player) => {
+          io.to(player.id).emit('game:started', startedPayload);
+          io.to(player.id).emit('game_started', startedPayload);
+        });
 
         // Update overall game state
         broadcastLobbyAndState(io, session);
