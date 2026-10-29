@@ -40,6 +40,11 @@ export interface GameSettings {
   jailTimeMinutes: number; // e.g. 15
   vetoDurationMinutes: number; // e.g. 20
   captureRadiusMeters: number; // e.g. 15
+  initialCoins?: number;
+  cityId?: string;
+  boundaryCenterLat?: number;
+  boundaryCenterLng?: number;
+  boundaryRadiusMeters?: number;
   transportRates: Record<string, number>;
 }
 
@@ -76,6 +81,12 @@ export interface ClientToServerEvents {
       wantsToBeRunner?: boolean;
       initialCoins?: number;
       jailTimeMinutes?: number;
+      pingIntervalMinutes?: number;
+      vetoDurationMinutes?: number;
+      cityId?: string;
+      boundaryCenterLat?: number;
+      boundaryCenterLng?: number;
+      boundaryRadiusMeters?: number;
     },
     callback?: (response: any) => void
   ) => void;
@@ -149,7 +160,10 @@ export interface ClientToServerEvents {
 
   'curse:veto': (payload: { curseId: string; bonusCoins: number }) => void;
 
-  'hunter:attempt_capture': () => void;
+  'hunter:attempt_capture': (
+    payload?: { lat?: number; lng?: number; accuracy?: number },
+    callback?: (response: any) => void
+  ) => void;
 
   'runner:confirm_captured': () => void;
 
@@ -244,7 +258,10 @@ export interface ServerToClientEvents {
     inRange: boolean;
     hunterName: string;
     distance: number;
+    error?: string;
   }) => void;
+
+  'settings:updated': (payload: { settings: GameSettings }) => void;
 
   'game:ended': (payload: { winner: string; history: any[] }) => void;
 

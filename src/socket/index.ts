@@ -407,10 +407,16 @@ export function setupSocketHandlers(io: AppSocketServer): void {
           emitToHunters(io, result.session.gameCode, 'hunters:updated', result.huntersList);
         }
 
-        // If Runner moved and broadcast conditions met: broadcast to hunters
+        // If Runner moved: broadcast runner ping to hunters room & direct sockets
         if (result.isRunner && result.broadcastRunnerPing && result.runnerPingPayload) {
           emitToHunters(io, result.session.gameCode, 'runner:last_ping', result.runnerPingPayload);
           emitToHunters(io, result.session.gameCode, 'hunter_ping', result.runnerPingPayload);
+          result.session.players.forEach((p) => {
+            if (p.role === 'HUNTER') {
+              io.to(p.id).emit('runner:last_ping', result.runnerPingPayload!);
+              io.to(p.id).emit('hunter_ping', result.runnerPingPayload!);
+            }
+          });
         }
 
         callback?.({ success: true, broadcasted: result.broadcastRunnerPing });
@@ -421,21 +427,48 @@ export function setupSocketHandlers(io: AppSocketServer): void {
     });
 
     // 9. HUNTER:ATTEMPT_CAPTURE
-    socket.on('hunter:attempt_capture', () => {
+    socket.on('hunter:attempt_capture', (rawPayload: any, callback?: any) => {
       try {
-        const result = gameManager.attemptCapture(socket.id);
-        if (!result.success || !result.session) return;
+        const payload = typeof rawPayload === 'function' ? {} : (rawPayload || {});
+        const cb = typeof rawPayload === 'function' ? rawPayload : callback;
+        const result = gameManager.attemptCapture(socket.id, payload);
 
-        // Threat event sent to entire game room
-        emitToGame(io, result.session.gameCode, 'capture:threat', {
-          inRange: result.inRange,
-          hunterName: result.hunterName,
-          distance: result.distance,
-        });
+        if (result.inRange && result.session) {
+          // Within capture range (<= 20m): trigger capture threat mode
+          emitToGame(io, result.session.gameCode, 'capture:threat', {
+            inRange: true,
+            hunterName: result.hunterName,
+            distance: result.distance,
+          });
+          if (result.session.runnerId) {
+            io.to(result.session.runnerId).emit('capture:threat', {
+              inRange: true,
+              hunterName: result.hunterName,
+              distance: result.distance,
+            });
+          }
+          cb?.({ success: true, inRange: true, distance: result.distance, hunterName: result.hunterName });
+        } else {
+          // Out of range (> 20m): dismiss threat and report error to hunter
+          if (result.session?.runnerId) {
+            io.to(result.session.runnerId).emit('capture:threat', {
+              inRange: false,
+              hunterName: result.hunterName,
+              distance: result.distance,
+            });
+          }
+          cb?.({
+            success: false,
+            inRange: false,
+            distance: result.distance,
+            error: result.error || `Trop loin du runner (${result.distance}m > 20m) !`,
+          });
+        }
 
-        console.log(`[Capture] Attempt by "${result.hunterName}". In range: ${result.inRange} (${result.distance}m)`);
+        console.log(`[Capture] Attempt by "${result.hunterName}". inRange: ${result.inRange} (${result.distance}m), error: ${result.error || 'none'}`);
       } catch (err) {
         console.error('[Socket.IO] Error in hunter:attempt_capture:', err);
+        callback?.({ success: false, error: String(err) });
       }
     });
 

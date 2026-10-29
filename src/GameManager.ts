@@ -117,13 +117,33 @@ export class GameManager {
     const requestedCode = (payload.gameId || payload.gameCode || '').trim().toUpperCase();
     const now = Date.now();
     const initialCoins = payload.initialCoins ?? DEFAULT_INITIAL_COINS;
-    const jailTimeMinutes = payload.jailTimeMinutes ?? DEFAULT_JAIL_TIME_MINUTES;
+    const jailTimeMinutes = typeof payload.jailTimeMinutes === 'number' && payload.jailTimeMinutes > 0 ? payload.jailTimeMinutes : DEFAULT_JAIL_TIME_MINUTES;
+    const pingIntervalMinutes = typeof payload.pingIntervalMinutes === 'number' && payload.pingIntervalMinutes > 0 ? payload.pingIntervalMinutes : DEFAULT_PING_INTERVAL_MINUTES;
+    const vetoDurationMinutes = typeof payload.vetoDurationMinutes === 'number' && payload.vetoDurationMinutes > 0 ? payload.vetoDurationMinutes : DEFAULT_VETO_DURATION_MINUTES;
+    const cityId = (payload.cityId || 'toulouse').toLowerCase();
+    const boundaryCenterLat = typeof payload.boundaryCenterLat === 'number' ? payload.boundaryCenterLat : 43.6045;
+    const boundaryCenterLng = typeof payload.boundaryCenterLng === 'number' ? payload.boundaryCenterLng : 1.4442;
+    const boundaryRadiusMeters = typeof payload.boundaryRadiusMeters === 'number' ? payload.boundaryRadiusMeters : 6000;
     const hostPlayerId = payload.playerId || hostSocketId;
     const hostName = (payload.name || '').trim() || 'Hôte';
 
-    // If session already exists with requestedCode, re-bind host socket and do NOT wipe room
+    // If session already exists with requestedCode, re-bind host socket and update settings
     if (requestedCode && this.sessions.has(requestedCode)) {
       const existingSession = this.sessions.get(requestedCode)!;
+      existingSession.settings = {
+        pingIntervalMinutes,
+        jailTimeMinutes,
+        vetoDurationMinutes,
+        captureRadiusMeters: CAPTURE_RADIUS_METERS,
+        initialCoins,
+        cityId,
+        boundaryCenterLat,
+        boundaryCenterLng,
+        boundaryRadiusMeters,
+        transportRates: { ...TRANSIT_RATES },
+      };
+      existingSession.runnerCoins = initialCoins;
+
       let hostPlayer = existingSession.players.get(hostSocketId);
       if (!hostPlayer) {
         const hostEntry = Array.from(existingSession.players.entries()).find(([oldId, p]) => {
@@ -173,10 +193,15 @@ export class GameManager {
       hostId: hostSocketId,
       stage: 'LOBBY',
       settings: {
-        pingIntervalMinutes: DEFAULT_PING_INTERVAL_MINUTES,
+        pingIntervalMinutes,
         jailTimeMinutes,
-        vetoDurationMinutes: DEFAULT_VETO_DURATION_MINUTES,
+        vetoDurationMinutes,
         captureRadiusMeters: CAPTURE_RADIUS_METERS,
+        initialCoins,
+        cityId,
+        boundaryCenterLat,
+        boundaryCenterLng,
+        boundaryRadiusMeters,
         transportRates: { ...TRANSIT_RATES },
       },
       players: playersMap,
@@ -666,41 +691,32 @@ export class GameManager {
       };
     }
 
-    // If Runner: check broadcast conditions to hunters
-    const isSonarActive = session.activeCurseId === 'curse_sonar';
-    const isJailTimeOver = session.jailTimeEndTime === 0 || now >= session.jailTimeEndTime;
-    const intervalMs = (session.settings.pingIntervalMinutes || 10) * 60 * 1000;
-    const isPeriodicDue =
-      !session.lastRunnerPingSentAt || now - session.lastRunnerPingSentAt >= intervalMs;
-
-    let broadcastRunnerPing = false;
-    let runnerPingPayload;
-
-    if (isSonarActive || (isJailTimeOver && isPeriodicDue)) {
-      broadcastRunnerPing = true;
-      session.lastRunnerPingSentAt = now;
-      runnerPingPayload = {
-        lat: data.lat,
-        lng: data.lng,
-        timestamp: now,
-        speedKmH: player.speedKmH,
-        avatarUri: player.avatarUri || undefined,
-      };
-    }
+    // If Runner sends ping_gps: authoritative ping from runner device -> always broadcast to hunters
+    session.lastRunnerPingSentAt = now;
+    const runnerPingPayload = {
+      lat: data.lat,
+      lng: data.lng,
+      timestamp: now,
+      speedKmH: player.speedKmH,
+      avatarUri: player.avatarUri || undefined,
+    };
 
     return {
       success: true,
       session,
       isRunner: true,
-      broadcastRunnerPing,
+      broadcastRunnerPing: true,
       runnerPingPayload,
     };
   }
 
   /**
-   * Hunter attempts capture: computes distance to runner
+   * Hunter attempts capture: computes distance to runner with tolerance and error reporting
    */
-  public attemptCapture(hunterSocketId: string): {
+  public attemptCapture(
+    hunterSocketId: string,
+    hunterCoords?: { lat?: number; lng?: number }
+  ): {
     success: boolean;
     session?: GameSession;
     inRange: boolean;
@@ -725,9 +741,55 @@ export class GameManager {
       return { success: false, inRange: false, distance: 9999, hunterName: hunter.name, error: 'Runner introuvable.' };
     }
 
-    const distMeters = computeDistanceMeters(hunter.lat, hunter.lng, runner.lat, runner.lng);
-    const radiusMeters = session.settings.captureRadiusMeters || CAPTURE_RADIUS_METERS;
+    // Determine Hunter coordinates: payload coords > player recorded coords
+    const hunterLat = (typeof hunterCoords?.lat === 'number' && hunterCoords.lat !== 0) ? hunterCoords.lat : hunter.lat;
+    const hunterLng = (typeof hunterCoords?.lng === 'number' && hunterCoords.lng !== 0) ? hunterCoords.lng : hunter.lng;
+
+    if (hunterLat !== 0 && hunterLng !== 0) {
+      hunter.lat = hunterLat;
+      hunter.lng = hunterLng;
+    } else {
+      return { success: false, inRange: false, distance: 9999, hunterName: hunter.name, error: 'Position GPS du chasseur indisponible.' };
+    }
+
+    // Determine Runner coordinates: runner's player coords or latest history ping
+    let runnerLat = runner.lat;
+    let runnerLng = runner.lng;
+    if (runnerLat === 0 || runnerLng === 0) {
+      const lastRunnerPing = [...session.history].reverse().find(h => h.role === 'RUNNER' && h.lat !== 0);
+      if (lastRunnerPing) {
+        runnerLat = lastRunnerPing.lat;
+        runnerLng = lastRunnerPing.lng;
+      }
+    }
+
+    if (runnerLat === 0 || runnerLng === 0) {
+      return { success: false, inRange: false, distance: 9999, hunterName: hunter.name, error: 'Position GPS du runner encore inconnue.' };
+    }
+
+    const distMeters = computeDistanceMeters(hunterLat, hunterLng, runnerLat, runnerLng);
+    const radiusMeters = session.settings.captureRadiusMeters || 20; // 20m tolerance for outdoor/street GPS
     const inRange = distMeters <= radiusMeters;
+    const roundedDist = Math.round(distMeters * 10) / 10;
+
+    if (!inRange) {
+      return {
+        success: false,
+        session,
+        inRange: false,
+        distance: roundedDist,
+        hunterName: hunter.name,
+        error: `Échec : Vous êtes trop loin du runner (${Math.round(distMeters)}m > ${radiusMeters}m) !`,
+      };
+    }
+
+    return {
+      success: true,
+      session,
+      inRange: true,
+      distance: roundedDist,
+      hunterName: hunter.name,
+    };
 
     return {
       success: true,
@@ -858,6 +920,7 @@ export class GameManager {
       history: session.history,
       lastHunterPing: session.history.filter((h) => h.role === 'RUNNER').pop() || null,
       players: playersObj,
+      settings: session.settings,
       createdAt: session.createdAt,
       updatedAt: Date.now(),
     };
